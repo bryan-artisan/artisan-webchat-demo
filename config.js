@@ -9,5 +9,5 @@
 //                                iframe and the loader. Local dev is
 //                                http://localhost:3000; a deployed env would be
 //                                e.g. https://app.artisan.co.
-window.ARTISAN_WEBCHAT_SITE_KEY = 'REPLACE_WITH_SITE_KEY';
-window.ARTISAN_WEBCHAT_EMBED_ORIGIN = 'http://localhost:3000';
+window.ARTISAN_WEBCHAT_SITE_KEY = 'sk_demo_northwind_inbound_2026';
+window.ARTISAN_WEBCHAT_EMBED_ORIGIN = 'http://localhost:3010';
