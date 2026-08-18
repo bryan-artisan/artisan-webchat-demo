@@ -140,6 +140,36 @@ from the iframe, not from this page:
 - If you deploy the iframe at a non-default Artisan origin, add THAT origin to
   `WEB_CHAT_EMBED_ORIGINS` (comma-separated) for the target environment.
 
+## Visiting as a real lead ("visit-as" picker)
+
+`config.js` also sets `window.ARTISAN_WEBCHAT_VISIT_AS_SERVER`, which loads a
+floating picker (bottom-left pill) letting you search real leads in the org
+and de-anonymize the visitor as one of them, without the vendor round-trip a
+real Vector/Demandbase identification would take.
+
+It needs its own sidecar server, from `apps/web-chat-e2e` in the artisan repo:
+
+```bash
+DATABASE_URL=<postgres-url-for-the-env-you're-testing> pnpm visit-as
+```
+
+Point `DATABASE_URL` at whatever the widget's own API is reading from for the
+environment you're testing against (dev RDS for the preview deployment, a
+branch-workspace tunnel, or your local Postgres). The sidecar resolves the org
+from the page's own site key, so the same server works unmodified against any
+environment.
+
+Picking a person seeds a fresh `website_visitor` row with a new Vector
+`up_id` and sets that as this page's `vector_up_id` cookie. It does **not**
+reach into an already-open conversation: web-chat only resolves identity once,
+on a fresh conversation, and only ever moves anonymous → identified, never
+back and never to a different person. To see the seeded identity, start a
+genuinely new conversation — a private/incognito window, or clearing this
+site's storage in the current one.
+
+Leave `ARTISAN_WEBCHAT_VISIT_AS_SERVER` unset to skip loading the picker
+entirely; a real customer's copy of this page never sets it.
+
 ## Mixed-content caveat
 
 GitHub Pages serves over HTTPS. If `ARTISAN_WEBCHAT_EMBED_ORIGIN` points at

@@ -20,3 +20,13 @@ window.ARTISAN_WEBCHAT_SITE_KEY = 'sk_1BFPomgPol49WRKyDjCgPjybDXs-kBUW';
 // the iframe origin gets no Access-Control-Allow-Origin and the bootstrap fetch
 // is blocked. Once devops sets that env on api-inbound, the chat opens.
 window.ARTISAN_WEBCHAT_EMBED_ORIGIN = 'https://app-inbound.dev.artisan.co';
+
+// Optional: the "visiting as" picker (apps/web-chat-e2e/src/tools/visit-as in
+// the artisan repo). Point it at wherever you're running that sidecar
+// (`pnpm visit-as`, default port 4700); leave unset to skip loading it. It
+// lets you pick a real lead from the org and seed a fresh de-anonymized
+// `website_visitor` row for them, so the widget's NEXT conversation resolves
+// as that person instead of anonymous. It cannot change the identity of a
+// conversation already open in the widget: web-chat only resolves identity
+// once, on a fresh conversation, and only anonymous -> identified.
+window.ARTISAN_WEBCHAT_VISIT_AS_SERVER = 'http://localhost:4700';

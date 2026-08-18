@@ -390,5 +390,29 @@
         document.body.appendChild(loader);
       })();
     </script>
+
+    <!--
+      "Visiting as" picker (dev tool, not part of the production embed snippet).
+
+      Serves from the visit-as sidecar in apps/web-chat-e2e/src/tools/visit-as
+      (run `pnpm visit-as` there). Skipped entirely when
+      ARTISAN_WEBCHAT_VISIT_AS_SERVER is unset, so this has no effect on a
+      real customer's copy of this page.
+    -->
+    <script>
+      (() => {
+        const siteKey = window.ARTISAN_WEBCHAT_SITE_KEY;
+        const visitAsServer = window.ARTISAN_WEBCHAT_VISIT_AS_SERVER;
+        if (!visitAsServer || !siteKey || siteKey === 'REPLACE_WITH_SITE_KEY') {
+          return;
+        }
+        const picker = document.createElement('script');
+        picker.src = `${visitAsServer.replace(/\/$/, '')}/visit-as.js`;
+        picker.async = true;
+        picker.setAttribute('data-site-key', siteKey);
+        picker.setAttribute('data-server', visitAsServer.replace(/\/$/, ''));
+        document.body.appendChild(picker);
+      })();
+    </script>
   </body>
 </html>
