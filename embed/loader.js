@@ -39,6 +39,12 @@
   const LAYOUT = { sidePanel: 'side-panel', floatingDialog: 'floating-dialog' };
   const IFRAME_PATH = '/embed/web-chat';
   const GLOBAL_FLAG = '__artisanWebChatLoaded';
+  // A hash-only navigation (e.g. an in-page anchor like `#contact`) is reported,
+  // but debounced by this long: a scrollspy-style nav that rewrites the hash on
+  // every scroll tick should coalesce into one report once the URL settles,
+  // rather than firing (and re-evaluating widget scope) on every intermediate
+  // hash (AR2-5222 follow-up).
+  const HASH_NAVIGATION_DEBOUNCE_MS = 1500;
   // First-party cookie the customer's Vector tracking pixel sets on the host page
   // to carry the identified person id (the Vector `up_id`). We forward it as the
   // bootstrap `visitorHint` so the API can link this chat to the matching
@@ -187,15 +193,19 @@
   const iframeSrc = `${artisanOrigin}${IFRAME_PATH}?siteKey=${encodeURIComponent(siteKey)}${pageParam}${visitorHintParam}${testSessionParam}${referrerParam}${utmSourceParam}${utmMediumParam}${utmCampaignParam}`;
 
   // `lastComparablePage` tracks pathname + search (hash excluded) as of the last
-  // navigation this loader reported, so a hash-only change is a no-op. Seeded
-  // from the same read that produced `hostPage`, so the first SPA navigation
-  // after load compares against the page the iframe actually bootstrapped with.
+  // navigation this loader reported. Seeded from the same read that produced
+  // `hostPage`, so the first SPA navigation after load compares against the page
+  // the iframe actually bootstrapped with. `lastHash` tracks the fragment
+  // separately (AR2-5222 follow-up) so a hash-only change, e.g. `#contact`, is
+  // still detected and reported, just debounced (see `handleLocationChange`).
   const state = {
     open: false,
     ready: false,
     unread: 0,
     pinned: false,
     lastComparablePage: currentComparablePage(),
+    lastHash: window.location.hash,
+    hashNavigationTimer: null,
   };
   const dom = {};
 
@@ -338,17 +348,50 @@
     renderBadge();
   };
 
-  // Reports an SPA navigation to the iframe so it can re-evaluate scope and the
-  // host can keep the visitor's page trail current (AR2-5222). Hash-only changes
-  // are not reported: the scope matcher and the page trail both ignore the
-  // fragment, so reporting one would only spam the iframe on anchor scrolling.
-  const handleLocationChange = () => {
-    const next = currentComparablePage();
-    if (next === state.lastComparablePage) {
+  const reportNavigation = () => {
+    postToIframe({ type: MESSAGE.navigation, page: window.location.href });
+  };
+
+  // Clears any pending debounced hash-only report — a real path/search
+  // navigation supersedes it, since `reportNavigation` below already covers
+  // whatever hash the URL now has.
+  const cancelPendingHashNavigation = () => {
+    if (state.hashNavigationTimer === null) {
       return;
     }
-    state.lastComparablePage = next;
-    postToIframe({ type: MESSAGE.navigation, page: window.location.href });
+    clearTimeout(state.hashNavigationTimer);
+    state.hashNavigationTimer = null;
+  };
+
+  // Reports an SPA navigation to the iframe so it can re-evaluate scope and the
+  // host can keep the visitor's page trail current (AR2-5222). A path/search
+  // change is reported immediately; a hash-only change (e.g. `#contact`) is
+  // still a real navigation for a single-page site, but is debounced so a
+  // scrollspy-style nav rewriting the hash on every scroll tick doesn't spam
+  // the iframe (AR2-5222 follow-up).
+  const handleLocationChange = () => {
+    const nextComparablePage = currentComparablePage();
+    const nextHash = window.location.hash;
+    const pageChanged = nextComparablePage !== state.lastComparablePage;
+    const hashChanged = nextHash !== state.lastHash;
+    if (!pageChanged && !hashChanged) {
+      return;
+    }
+
+    state.lastComparablePage = nextComparablePage;
+    state.lastHash = nextHash;
+
+    if (pageChanged) {
+      cancelPendingHashNavigation();
+      reportNavigation();
+      return;
+    }
+
+    cancelPendingHashNavigation();
+    state.hashNavigationTimer = setTimeout(() => {
+      state.hashNavigationTimer = null;
+      reportNavigation();
+    }, HASH_NAVIGATION_DEBOUNCE_MS);
   };
 
   // Wraps a History API method so a SPA router's pushState/replaceState calls
