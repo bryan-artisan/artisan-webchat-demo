@@ -18,6 +18,23 @@ Everything here is local and static. There is no build step and no backend.
 └── README.md
 ```
 
+## Keeping `embed/loader.js` in sync
+
+This copy has to be refreshed by hand (or by whatever tooling runs the sync)
+every time `apps/web/public/embed/loader.js` changes in the Artisan repo — it
+is not fetched live, for the `resolveScript()` reason explained below. A stale
+copy silently ships an old loader with no error: this is exactly what happened
+with AR2-5222, where SPA/hash navigation tracking shipped in the Artisan repo
+but this demo's loader.js stayed frozen at an earlier version for a month, so
+the demo page never reported hash-only navigations (e.g. `#contact`).
+
+`deploy-web-preview` (the Artisan repo's helper that deploys `apps/web` to the
+`artisan-inbound` Vercel preview) now syncs this file automatically after every
+run: it diffs the deployed `apps/web/public/embed/loader.js` against this repo's
+copy and pushes a refresh commit here if they differ. If you change the loader
+some other way (a local build, a different deploy path), refresh this file
+manually by copying `apps/web/public/embed/loader.js` from the Artisan repo.
+
 ## How to run it locally
 
 The page is static, but it must be served over http (opening the file with a
