@@ -31,6 +31,8 @@
     close: 'artisan-web-chat:close',
     visibility: 'artisan-web-chat:visibility',
     layout: 'artisan-web-chat:layout',
+    scope: 'artisan-web-chat:scope',
+    navigation: 'artisan-web-chat:navigation',
   };
   // Widget layout modes, kept in sync with WEB_CHAT_WIDGET_MODE in
   // apps/web/lib/constants/web-chat/embed.ts.
@@ -105,6 +107,45 @@
   const hostPage = resolveHostPage();
   const pageParam = hostPage ? `&page=${encodeURIComponent(hostPage)}` : '';
 
+  // Pathname + search only (hash excluded), used to detect a real SPA navigation
+  // as opposed to an anchor/hash change (AR2-5222). Best-effort, matching
+  // resolveHostPage above.
+  const currentComparablePage = () => {
+    try {
+      return window.location.pathname + window.location.search;
+    } catch {
+      return '';
+    }
+  };
+
+  // `document.referrer` and the host page's own `utm_*` query params (AR2-5041,
+  // S15). Same cross-origin reasoning as `page` above: only this loader, running
+  // on the customer's page, can read them. Best-effort — an unreadable
+  // referrer/URL just omits the params, same as `page`.
+  const resolveReferrer = () => {
+    try {
+      return document.referrer || '';
+    } catch {
+      return '';
+    }
+  };
+  const resolveUtmParams = () => {
+    try {
+      return new URLSearchParams(window.location.search);
+    } catch {
+      return new URLSearchParams();
+    }
+  };
+  const referrer = resolveReferrer();
+  const referrerParam = referrer ? `&referrer=${encodeURIComponent(referrer)}` : '';
+  const utmParams = resolveUtmParams();
+  const utmSource = utmParams.get('utm_source') || '';
+  const utmMedium = utmParams.get('utm_medium') || '';
+  const utmCampaign = utmParams.get('utm_campaign') || '';
+  const utmSourceParam = utmSource ? `&utmSource=${encodeURIComponent(utmSource)}` : '';
+  const utmMediumParam = utmMedium ? `&utmMedium=${encodeURIComponent(utmMedium)}` : '';
+  const utmCampaignParam = utmCampaign ? `&utmCampaign=${encodeURIComponent(utmCampaign)}` : '';
+
   // Read a single cookie's raw value out of a `document.cookie` string. Pure
   // (takes the cookie string, not `document`) so it is unit-testable. Returns ''
   // when the cookie is absent.
@@ -137,9 +178,25 @@
   const visitorHint = decodeCookieValue(readCookie(document.cookie, vectorCookieName));
   const visitorHintParam = visitorHint ? `&visitorHint=${encodeURIComponent(visitorHint)}` : '';
 
-  const iframeSrc = `${artisanOrigin}${IFRAME_PATH}?siteKey=${encodeURIComponent(siteKey)}${pageParam}${visitorHintParam}`;
+  // Test live (console "try it live") sets this so the bootstrap authenticates
+  // as the operator and marks the conversation `is_test=true` instead of a real
+  // visitor session. Absent on every customer-facing install.
+  const isTestSession = script.getAttribute('data-test-session') === 'true';
+  const testSessionParam = isTestSession ? '&testSession=true' : '';
 
-  const state = { open: false, ready: false, unread: 0, pinned: false };
+  const iframeSrc = `${artisanOrigin}${IFRAME_PATH}?siteKey=${encodeURIComponent(siteKey)}${pageParam}${visitorHintParam}${testSessionParam}${referrerParam}${utmSourceParam}${utmMediumParam}${utmCampaignParam}`;
+
+  // `lastComparablePage` tracks pathname + search (hash excluded) as of the last
+  // navigation this loader reported, so a hash-only change is a no-op. Seeded
+  // from the same read that produced `hostPage`, so the first SPA navigation
+  // after load compares against the page the iframe actually bootstrapped with.
+  const state = {
+    open: false,
+    ready: false,
+    unread: 0,
+    pinned: false,
+    lastComparablePage: currentComparablePage(),
+  };
   const dom = {};
 
   // ---------------------------------------------------------------- UI build
@@ -179,7 +236,8 @@
         box-shadow: -8px 0 32px rgba(20,16,40,0.16); display: block;
       }
       .artisan-web-chat-launcher--hidden,
-      .artisan-web-chat-badge--hidden { display: none !important; }
+      .artisan-web-chat-badge--hidden,
+      .artisan-web-chat-frame--hidden { display: none !important; }
     `;
     document.head.appendChild(style);
 
@@ -259,10 +317,59 @@
     }
   };
 
+  // The operator scoped the widget to other pages (D-1, AR2-4135). On a SPA the
+  // iframe re-evaluates scope on every navigation (AR2-5222), so this has to be
+  // reversible: `hide()` visually removes the chrome from the host page while
+  // keeping the iframe and the message listener alive, and `show()` restores it
+  // once a later navigation brings the page back into scope. Respects the
+  // side-panel layout, which already hides the launcher/badge on its own.
+  const hide = () => {
+    dom.launcher?.classList.add('artisan-web-chat-launcher--hidden');
+    dom.badge?.classList.add('artisan-web-chat-badge--hidden');
+    dom.iframe?.classList.add('artisan-web-chat-frame--hidden');
+  };
+
+  const show = () => {
+    dom.iframe?.classList.remove('artisan-web-chat-frame--hidden');
+    if (!state.pinned) {
+      dom.launcher?.classList.remove('artisan-web-chat-launcher--hidden');
+      dom.badge?.classList.remove('artisan-web-chat-badge--hidden');
+    }
+    renderBadge();
+  };
+
+  // Reports an SPA navigation to the iframe so it can re-evaluate scope and the
+  // host can keep the visitor's page trail current (AR2-5222). Hash-only changes
+  // are not reported: the scope matcher and the page trail both ignore the
+  // fragment, so reporting one would only spam the iframe on anchor scrolling.
+  const handleLocationChange = () => {
+    const next = currentComparablePage();
+    if (next === state.lastComparablePage) {
+      return;
+    }
+    state.lastComparablePage = next;
+    postToIframe({ type: MESSAGE.navigation, page: window.location.href });
+  };
+
+  // Wraps a History API method so a SPA router's pushState/replaceState calls
+  // are visible to the loader, mirroring the engagement-script precedent
+  // (apps/api/src/website-visitor/constants.ts).
+  const wrapHistoryMethod = (name) => {
+    const original = history[name];
+    if (typeof original !== 'function') {
+      return;
+    }
+    history[name] = (...args) => {
+      const result = original.apply(history, args);
+      handleLocationChange();
+      return result;
+    };
+  };
+
   // ---------------------------------------------------------------- bridge
   const onMessage = (event) => {
     // Only trust messages from the Artisan iframe we injected.
-    if (event.origin !== artisanOrigin || event.source !== dom.iframe.contentWindow) {
+    if (event.origin !== artisanOrigin || event.source !== dom.iframe?.contentWindow) {
       return;
     }
     const data = event.data;
@@ -273,6 +380,13 @@
       state.ready = true;
       // Tell the iframe its current visibility so it can reset unread on open.
       postToIframe({ type: MESSAGE.visibility, open: state.open });
+      // Heals a navigation that raced the iframe's mount (or happened before a
+      // reload finished): if the page has moved on from what the iframe was
+      // given at bootstrap, tell it now rather than leaving it stale until the
+      // next navigation.
+      if (window.location.href !== hostPage) {
+        postToIframe({ type: MESSAGE.navigation, page: window.location.href });
+      }
       return;
     }
     if (data.type === MESSAGE.unread) {
@@ -284,6 +398,14 @@
       applyLayout(data.mode);
       return;
     }
+    if (data.type === MESSAGE.scope) {
+      if (data.inScope === false) {
+        hide();
+      } else {
+        show();
+      }
+      return;
+    }
     if (data.type === MESSAGE.close) {
       setOpen(false);
     }
@@ -293,6 +415,10 @@
   const init = () => {
     buildUi();
     window.addEventListener('message', onMessage);
+    window.addEventListener('popstate', handleLocationChange);
+    window.addEventListener('hashchange', handleLocationChange);
+    wrapHistoryMethod('pushState');
+    wrapHistoryMethod('replaceState');
   };
 
   if (document.readyState === 'loading') {
