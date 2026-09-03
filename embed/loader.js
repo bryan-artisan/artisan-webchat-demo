@@ -59,6 +59,15 @@
   // means de-anon does not fire, never a broken widget.
   const VECTOR_COOKIE_DEFAULT = 'vector_up_id';
 
+  // Panel open/close motion. Opening overshoots slightly and settles, which is
+  // the spring the v033 design asks for; closing pulls straight back in on a
+  // shorter, plain ease so a dismissal never feels bouncy. Both are declared
+  // here rather than inline so the closing duration and the delay on the
+  // visibility switch cannot drift apart.
+  const SPRING_EASING = 'cubic-bezier(0.34, 1.56, 0.64, 1)';
+  const OPEN_DURATION_MS = 340;
+  const CLOSE_DURATION_MS = 200;
+
   // ---------------------------------------------------------------- config
   const resolveScript = () => {
     if (document.currentScript instanceof HTMLScriptElement) {
@@ -214,7 +223,8 @@
     const style = document.createElement('style');
     style.textContent = `
       .artisan-web-chat-launcher {
-        position: fixed; right: 20px; bottom: 20px; width: 60px; height: 60px;
+        position: fixed; right: 24px; bottom: 24px; width: 59px; height: 59px;
+        box-sizing: border-box; padding: 0;
         border-radius: 50%; border: none; cursor: pointer; color: #fff;
         background: #682fc5; box-shadow: 0 8px 24px rgba(20,16,40,0.28);
         display: flex; align-items: center; justify-content: center;
@@ -222,6 +232,11 @@
       }
       .artisan-web-chat-launcher:hover { transform: scale(1.05); }
       .artisan-web-chat-launcher svg { width: 28px; height: 28px; }
+      /* The glyph tracks the panel: a chat bubble to open it, a chevron down to
+         put it away, so the control says what pressing it will do. */
+      .artisan-web-chat-launcher .artisan-web-chat-launcher-close,
+      .artisan-web-chat-launcher[data-open="true"] .artisan-web-chat-launcher-open { display: none; }
+      .artisan-web-chat-launcher[data-open="true"] .artisan-web-chat-launcher-close { display: block; }
       .artisan-web-chat-badge {
         position: fixed; right: 16px; bottom: 60px; min-width: 20px; height: 20px;
         padding: 0 6px; border-radius: 10px; background: #dc2626; color: #fff;
@@ -230,20 +245,43 @@
         box-shadow: 0 2px 8px rgba(0,0,0,0.2);
       }
       .artisan-web-chat-badge[data-visible="true"] { display: block; }
+      /* The panel stays in the layout so opening and closing it can animate.
+         Closed it is visibility:hidden, which keeps it out of the tab order and
+         the accessibility tree exactly as display:none did, and the visibility
+         switch is delayed on the way out so the collapse is still visible while
+         it plays. */
       .artisan-web-chat-frame {
-        position: fixed; right: 20px; bottom: 92px; width: 400px; height: 620px;
+        position: fixed; right: 24px; bottom: 92px; width: 386px; height: 630px;
         max-width: calc(100vw - 40px); max-height: calc(100vh - 112px);
-        border: none; border-radius: 16px; overflow: hidden; display: none;
+        border: none; border-radius: 18px; overflow: hidden; display: block;
         box-shadow: 0 24px 64px rgba(20,16,40,0.28); z-index: 2147483000;
         background: transparent; color-scheme: light;
+        opacity: 0; visibility: hidden; pointer-events: none;
+        transform: translateY(16px) scale(0.96); transform-origin: 100% 100%;
+        transition:
+          transform ${CLOSE_DURATION_MS}ms cubic-bezier(0.4, 0, 1, 1),
+          opacity ${CLOSE_DURATION_MS}ms ease-in,
+          visibility 0s linear ${CLOSE_DURATION_MS}ms;
       }
-      .artisan-web-chat-frame[data-open="true"] { display: block; }
+      .artisan-web-chat-frame[data-open="true"] {
+        opacity: 1; visibility: visible; pointer-events: auto;
+        transform: translateY(0) scale(1);
+        transition:
+          transform ${OPEN_DURATION_MS}ms ${SPRING_EASING},
+          opacity 160ms ease-out,
+          visibility 0s;
+      }
       /* Side-panel (pinned) layout: a full-height panel docked to the right edge,
          always present. No launcher, no floating box, no rounded corners. */
       .artisan-web-chat-frame--pinned {
-        top: 0; right: 0; bottom: 0; width: 400px; height: 100vh;
+        top: 0; right: 0; bottom: 0; width: 421px; height: 100vh;
         max-width: 90vw; max-height: 100vh; border-radius: 0;
-        box-shadow: -8px 0 32px rgba(20,16,40,0.16); display: block;
+        box-shadow: -8px 0 32px rgba(20,16,40,0.16);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .artisan-web-chat-launcher,
+        .artisan-web-chat-frame,
+        .artisan-web-chat-frame[data-open="true"] { transition: none; }
       }
       .artisan-web-chat-launcher--hidden,
       .artisan-web-chat-badge--hidden,
@@ -256,10 +294,16 @@
     launcher.className = 'artisan-web-chat-launcher';
     launcher.setAttribute('data-testid', 'webchat-launcher');
     launcher.setAttribute('aria-label', 'Open chat');
+    launcher.setAttribute('data-open', 'false');
     launcher.innerHTML =
-      '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+      '<svg class="artisan-web-chat-launcher-open" viewBox="0 0 24 24" fill="none" ' +
+      'xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
       '<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H9l-4 4v-4H6.5A2.5 2.5 0 0 1 4 13.5v-8Z" ' +
-      'fill="currentColor"/></svg>';
+      'fill="currentColor"/></svg>' +
+      '<svg class="artisan-web-chat-launcher-close" viewBox="0 0 24 24" fill="none" ' +
+      'xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+      '<path d="M6 9.5 12 15.5 18 9.5" stroke="currentColor" stroke-width="2.2" ' +
+      'stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
     const badge = document.createElement('span');
     badge.className = 'artisan-web-chat-badge';
@@ -305,6 +349,8 @@
     }
     state.open = open;
     dom.iframe.setAttribute('data-open', String(open));
+    dom.launcher.setAttribute('data-open', String(open));
+    dom.launcher.setAttribute('aria-label', open ? 'Close chat' : 'Open chat');
     if (open) {
       state.unread = 0;
     }
