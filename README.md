@@ -13,6 +13,7 @@ Everything here is local and static. There is no build step and no backend.
 .
 ├── index.html      # The landing page + the widget bootstrap
 ├── config.js       # Site key + embed origin (the only thing you edit)
+├── visit-as.js     # Optional "visiting as" pill (dev tool, see below)
 ├── embed/
 │   └── loader.js   # Exact copy of the Artisan loader (apps/web/public/embed/loader.js)
 └── README.md
@@ -159,33 +160,38 @@ from the iframe, not from this page:
 
 ## Visiting as a real lead ("visit-as" picker)
 
-`config.js` also sets `window.ARTISAN_WEBCHAT_VISIT_AS_SERVER`, which loads a
-floating picker (bottom-left pill) letting you search real leads in the org
-and de-anonymize the visitor as one of them, without the vendor round-trip a
-real Vector/Demandbase identification would take.
+`visit-as.js` draws a floating pill (bottom-left) that lets you de-anonymize the
+visitor as a real lead from the org, without the vendor round-trip a real
+Vector/Demandbase identification would take. Nothing runs locally: the pill
+opens a picker page on the Artisan app origin, and that page talks to the API.
 
-It needs its own sidecar server, from `apps/web-chat-e2e` in the artisan repo:
+The picker lives on the Artisan app origin because this page's origin cannot
+carry the Artisan session cookie. That cookie is `SameSite=Lax` and host-only,
+so a request from `bryan-artisan.github.io` arrives without a session no matter
+what the server allows. Opening a popup is a top-level navigation, which does
+carry the cookie, and from there the app and the API are same-site.
 
-```bash
-DATABASE_URL=<postgres-url-for-the-env-you're-testing> pnpm visit-as
-```
+To use it:
 
-Point `DATABASE_URL` at whatever the widget's own API is reading from for the
-environment you're testing against (dev RDS for the preview deployment, a
-branch-workspace tunnel, or your local Postgres). The sidecar resolves the org
-from the page's own site key, so the same server works unmodified against any
-environment.
+1. Sign in at the embed origin (`https://app-inbound.dev.artisan.co`) with an
+   account that belongs to the organization that owns the site key in
+   `config.js`. The picker refuses anyone else.
+2. Open this page once with `#visit-as` on the URL. That is the only way to
+   summon the pill the first time; after a successful pick it comes back on its
+   own.
+3. Click the pill, search for a person, and pick one. The popup posts the new
+   identity back to this page and closes.
 
-Picking a person seeds a fresh `website_visitor` row with a new Vector
-`up_id` and sets that as this page's `vector_up_id` cookie. It does **not**
-reach into an already-open conversation: web-chat only resolves identity once,
-on a fresh conversation, and only ever moves anonymous → identified, never
-back and never to a different person. To see the seeded identity, start a
-genuinely new conversation — a private/incognito window, or clearing this
-site's storage in the current one.
+Picking a person seeds a fresh `website_visitor` row with a new Vector `up_id`
+and sets that as this page's `vector_up_id` cookie. It does **not** reach into
+an already-open conversation: web-chat only resolves identity once, on a fresh
+conversation, and only ever moves anonymous → identified, never back and never
+to a different person. To see the seeded identity, start a genuinely new
+conversation, in a private window or after clearing this site's storage.
 
-Leave `ARTISAN_WEBCHAT_VISIT_AS_SERVER` unset to skip loading the picker
-entirely; a real customer's copy of this page never sets it.
+The picker page only exists where the Artisan API has its development test
+routes enabled, which is the inbound preview and not production. Everywhere
+else the popup says so and nothing is seeded.
 
 ## Mixed-content caveat
 
