@@ -20,6 +20,10 @@
   const COOKIE_NAME = 'vector_up_id';
   const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
   const POPUP_FEATURES = 'popup,width=420,height=640';
+  // The embed loader reads the Vector cookie once, while it is building the
+  // iframe URL, so a cookie written after the widget has loaded reaches nothing.
+  // Reloading is what puts the new identity in front of the widget.
+  const RELOAD_DELAY_MS = 400;
 
   const wantsPicker = () => {
     if (window.location.hash.indexOf('visit-as') !== -1) {
@@ -108,6 +112,7 @@
     const fullName = typeof data.fullName === 'string' ? data.fullName : '';
     remember(fullName);
     pill.textContent = fullName ? `Visiting as ${fullName}` : 'Visiting as a lead';
+    window.setTimeout(() => window.location.reload(), RELOAD_DELAY_MS);
   });
 
   document.body.appendChild(pill);

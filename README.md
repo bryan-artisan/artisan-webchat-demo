@@ -180,14 +180,20 @@ To use it:
    summon the pill the first time; after a successful pick it comes back on its
    own.
 3. Click the pill, search for a person, and pick one. The popup posts the new
-   identity back to this page and closes.
+   identity back to this page and closes, and this page reloads itself.
 
 Picking a person seeds a fresh `website_visitor` row with a new Vector `up_id`
-and sets that as this page's `vector_up_id` cookie. It does **not** reach into
-an already-open conversation: web-chat only resolves identity once, on a fresh
-conversation, and only ever moves anonymous → identified, never back and never
-to a different person. To see the seeded identity, start a genuinely new
-conversation, in a private window or after clearing this site's storage.
+and sets that as this page's `vector_up_id` cookie. The reload is not cosmetic:
+the embed loader reads that cookie once, while it builds the iframe URL, so a
+cookie written after the widget loaded would otherwise reach nothing.
+
+It does **not** reach into an already-open conversation. Web-chat resolves
+identity once, on a fresh conversation, and only ever moves anonymous →
+identified, never back and never to a different person. The widget also
+remembers its conversation across reloads, in storage on the Artisan origin
+rather than this one, so a chat you already started comes back as it was. To see
+the seeded identity from the first message, use a private window, or close the
+open chat out by rating it.
 
 The picker page only exists where the Artisan API has its development test
 routes enabled, which is the inbound preview and not production. Everywhere
