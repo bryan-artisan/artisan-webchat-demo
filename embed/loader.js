@@ -15,10 +15,16 @@
 //      read this cookie — it is first-party to the customer domain, and the
 //      iframe is cross-origin to it.
 //
-// The loader itself makes NO API calls — bootstrap / streaming / sending all
-// happen INSIDE the iframe (same-origin to the Artisan API's CORS allowlist).
-// The loader only owns the host-page launcher + a postMessage bridge to the
-// iframe (open/close the panel, and an unread-count badge while it is closed).
+// The loader makes exactly ONE request of its own: a cacheable GET to
+// `<artisan-origin>/embed/loader-config`, which tells it whether to render a
+// launcher here at all, what color it is, and whether this org uses the pinned
+// layout (L3, B10). It carries no credentials and nothing about the visitor,
+// and it is never a security decision — the API re-checks the kill switch, the
+// rollout flag, the origin and the page scope when the chat actually opens.
+// Everything else — bootstrap / streaming / sending — still happens INSIDE the
+// iframe (same-origin to the Artisan API's CORS allowlist). The loader owns the
+// host-page launcher + a postMessage bridge to the iframe (open/close the
+// panel, and an unread-count badge while it is closed).
 //
 // Delivery mirrors the website-visitor tracking snippet: a static, cacheable JS
 // asset served from the app origin that a customer references by <script src>.
@@ -33,6 +39,8 @@
     layout: 'artisan-web-chat:layout',
     scope: 'artisan-web-chat:scope',
     navigation: 'artisan-web-chat:navigation',
+    handshake: 'artisan-web-chat:handshake',
+    handshakeAck: 'artisan-web-chat:handshake-ack',
   };
   // Widget layout modes, kept in sync with WEB_CHAT_WIDGET_MODE in
   // apps/web/lib/constants/web-chat/embed.ts.
@@ -67,6 +75,23 @@
   const SPRING_EASING = 'cubic-bezier(0.34, 1.56, 0.64, 1)';
   const OPEN_DURATION_MS = 340;
   const CLOSE_DURATION_MS = 200;
+
+  // Lazy mount (L3, B10). The iframe bootstraps a conversation the moment it
+  // loads, so mounting it on every pageview made a site's bootstrap rate its
+  // pageview rate, which is one database transaction per pageview for the
+  // overwhelming majority of visitors who never open the chat. It now waits for
+  // someone to actually want the chat. What runs on every pageview instead is
+  // one small, cacheable GET for the launcher's own configuration.
+  const LOADER_CONFIG_PATH = '/embed/loader-config';
+  const DEFAULT_BRAND_COLOR = '#682fc5';
+  const PINNED_CHAT_LAYOUT = 'pinned';
+  // A visitor who navigates mid-conversation must not lose the open panel and
+  // the unread count until they think to click the launcher again, so the
+  // loader remembers that this visitor has the chat open and mounts straight
+  // away on the next page. It expires, or every visitor who ever opened the
+  // chat would be back to mounting on every pageview forever.
+  const RETURNING_SESSION_KEY_PREFIX = 'artisan-web-chat:last-open:';
+  const RETURNING_SESSION_TTL_MS = 30 * 60 * 1000;
 
   // ---------------------------------------------------------------- config
   const resolveScript = () => {
@@ -209,6 +234,7 @@
   // still detected and reported, just debounced (see `handleLocationChange`).
   const state = {
     open: false,
+    mounted: false,
     ready: false,
     unread: 0,
     pinned: false,
@@ -317,7 +343,6 @@
     iframe.setAttribute('data-open', 'false');
     iframe.setAttribute('title', 'Chat');
     iframe.setAttribute('allow', 'microphone; camera; autoplay');
-    iframe.src = iframeSrc;
 
     document.body.appendChild(launcher);
     document.body.appendChild(badge);
@@ -330,6 +355,40 @@
     launcher.addEventListener('click', () => setOpen(!state.open));
   };
 
+  // Loads the chat surface. Everything the widget does beyond showing a
+  // launcher goes through here, and it runs at most once per pageview: a second
+  // assignment would reload the iframe and throw away the conversation the
+  // visitor is in the middle of.
+  const mountIframe = () => {
+    if (state.mounted || !dom.iframe) {
+      return;
+    }
+    state.mounted = true;
+    dom.iframe.src = iframeSrc;
+  };
+
+  // Records that this visitor has the chat open, so the next page in the same
+  // visit loads it without waiting for another click. Storage can be
+  // unavailable (a blocked third-party context, a private window, a full quota)
+  // and none of that is worth breaking the widget over.
+  const returningSessionKey = `${RETURNING_SESSION_KEY_PREFIX}${siteKey}`;
+  const markSessionOpen = () => {
+    try {
+      window.localStorage.setItem(returningSessionKey, String(Date.now()));
+    } catch {
+      // Ignored: the visitor just clicks again on the next page.
+    }
+  };
+
+  const hasRecentSession = () => {
+    try {
+      const openedAt = Number(window.localStorage.getItem(returningSessionKey));
+      return openedAt > 0 && Date.now() - openedAt < RETURNING_SESSION_TTL_MS;
+    } catch {
+      return false;
+    }
+  };
+
   const renderBadge = () => {
     const visible = !state.open && state.unread > 0;
     dom.badge.setAttribute('data-visible', String(visible));
@@ -337,6 +396,11 @@
   };
 
   const postToIframe = (message) => {
+    // An unmounted frame is still about:blank, so a message posted at it is
+    // silently lost with nothing to say it never arrived.
+    if (!state.mounted) {
+      return;
+    }
     if (dom.iframe?.contentWindow) {
       dom.iframe.contentWindow.postMessage(message, artisanOrigin);
     }
@@ -346,6 +410,10 @@
     // The side panel is always present, so a close never collapses it.
     if (state.pinned && !open) {
       return;
+    }
+    if (open) {
+      mountIframe();
+      markSessionOpen();
     }
     state.open = open;
     dom.iframe.setAttribute('data-open', String(open));
@@ -465,6 +533,16 @@
     if (!data || typeof data.type !== 'string') {
       return;
     }
+    // The origin handshake (S1). We echo the nonce straight back, targeted at
+    // the Artisan origin so nothing else can read it. The value that matters is
+    // not in this payload at all: the browser stamps this ack's origin, and
+    // that stamp is what the iframe reports to the server as the site it is
+    // embedded on. This runs before the ready branch because the iframe probes
+    // as soon as it mounts.
+    if (data.type === MESSAGE.handshake) {
+      postToIframe({ type: MESSAGE.handshakeAck, nonce: data.nonce });
+      return;
+    }
     if (data.type === MESSAGE.ready) {
       state.ready = true;
       // Tell the iframe its current visibility so it can reset unread on open.
@@ -500,9 +578,62 @@
     }
   };
 
+  // ------------------------------------------------------- loader config (B10)
+  // The path only, never the query string: a campaign's `utm_*` parameters would
+  // shatter the CDN cache key page by page and put visitor-carried values into a
+  // public cache, and the page scope this answers is defined over paths anyway.
+  const loaderConfigUrl = () => {
+    const url = `${artisanOrigin}${LOADER_CONFIG_PATH}?siteKey=${encodeURIComponent(siteKey)}`;
+    try {
+      return `${url}&path=${encodeURIComponent(window.location.pathname)}`;
+    } catch {
+      return url;
+    }
+  };
+
+  const applyLoaderConfig = (config) => {
+    if (!config || typeof config !== 'object') {
+      return;
+    }
+    if (config.enabled === false) {
+      hide();
+      return;
+    }
+    if (typeof config.brandColor === 'string' && config.brandColor) {
+      dom.launcher.style.background = config.brandColor;
+    }
+    // A pinned org has no launcher to click, so its panel is the page, and
+    // deferring it would render nothing at all.
+    if (config.chatLayout === PINNED_CHAT_LAYOUT) {
+      mountIframe();
+    }
+  };
+
+  // Never blocks the launcher. The whole answer is an optimization plus some
+  // branding, so a config that never arrives leaves a working widget in the
+  // default color that still defers the iframe until the visitor asks for it.
+  const loadConfig = () => {
+    if (typeof fetch !== 'function') {
+      return;
+    }
+    fetch(loaderConfigUrl(), { credentials: 'omit' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body) => applyLoaderConfig(body?.data))
+      .catch(() => {
+        // Ignored: see above. The launcher is already on the page.
+      });
+  };
+
   // ---------------------------------------------------------------- init
   const init = () => {
     buildUi();
+    dom.launcher.style.background = DEFAULT_BRAND_COLOR;
+    // A visitor who is mid-conversation gets the chat back on the next page
+    // without waiting for the config round trip.
+    if (hasRecentSession()) {
+      mountIframe();
+    }
+    loadConfig();
     window.addEventListener('message', onMessage);
     window.addEventListener('popstate', handleLocationChange);
     window.addEventListener('hashchange', handleLocationChange);
