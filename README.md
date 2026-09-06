@@ -162,14 +162,17 @@ from the iframe, not from this page:
 
 `visit-as.js` draws a floating pill (bottom-left) that lets you de-anonymize the
 visitor as a real lead from the org, without the vendor round-trip a real
-Vector/Demandbase identification would take. Nothing runs locally: the pill
-opens a picker page on the Artisan app origin, and that page talks to the API.
+Vector/Demandbase identification would take. Nothing runs locally: searching and
+picking happen in a panel on this page, which calls the Artisan API directly.
 
-The picker lives on the Artisan app origin because this page's origin cannot
-carry the Artisan session cookie. That cookie is `SameSite=Lax` and host-only,
-so a request from `bryan-artisan.github.io` arrives without a session no matter
-what the server allows. Opening a popup is a top-level navigation, which does
-carry the cookie, and from there the app and the API are same-site.
+Signing in is the one part that cannot happen here. The Artisan session cookie
+is `SameSite=Lax` and host-only, so a request from `bryan-artisan.github.io`
+arrives without a session no matter what the server allows, and the app refuses
+to be framed at all. So the first click opens a small window on the Artisan app
+origin, where the cookie does apply. That window checks that you belong to the
+organization behind the site key, hands this page a token that is good for 30
+minutes and only for this site, and closes itself. Every later click just opens
+the panel.
 
 To use it:
 
@@ -179,8 +182,9 @@ To use it:
 2. Open this page once with `#visit-as` on the URL. That is the only way to
    summon the pill the first time; after a successful pick it comes back on its
    own.
-3. Click the pill, search for a person, and pick one. The popup posts the new
-   identity back to this page and closes, and this page reloads itself.
+3. Click the pill. The first time, a window opens and closes on its own to
+   unlock the picker. Then search for a person in the panel and pick one, and
+   this page reloads itself.
 
 Picking a person seeds a fresh `website_visitor` row with a new Vector `up_id`
 and sets that as this page's `vector_up_id` cookie. The reload is not cosmetic:
@@ -195,9 +199,12 @@ rather than this one, so a chat you already started comes back as it was. To see
 the seeded identity from the first message, use a private window, or close the
 open chat out by rating it.
 
-The picker page only exists where the Artisan API has its development test
-routes enabled, which is the inbound preview and not production. Everywhere
-else the popup says so and nothing is seeded.
+The picker page and the API routes behind it only exist where the Artisan API
+has its development test routes enabled, which is the inbound preview and not
+production. Everywhere else the window says so and nothing is seeded. The token
+carries the site it was minted for, and the API re-checks your membership on
+every call, so losing access to the org ends the session on the next click
+rather than at expiry.
 
 ## Mixed-content caveat
 
