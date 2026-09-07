@@ -93,6 +93,32 @@
   const RETURNING_SESSION_KEY_PREFIX = 'artisan-web-chat:last-open:';
   const RETURNING_SESSION_TTL_MS = 30 * 60 * 1000;
 
+  // Inline side panel. A customer who wants the pinned panel to sit BESIDE the
+  // page rather than over it puts one empty div in their template:
+  //
+  //   <div id="artisan-chat"></div>
+  //
+  // and the panel mounts inside it, so their own layout reflows around the
+  // reserved column instead of losing its right edge under an overlay. With no
+  // such div the panel keeps the fixed-overlay presentation, so the existing
+  // one-line install is unchanged.
+  //
+  // Neither the snippet nor the div names a layout. Which one is in force is
+  // resolved at runtime, from the loader config and the iframe's layout
+  // message, so switching between the floating widget and the side panel in the
+  // console never asks the customer to touch their site again.
+  const SIDE_PANEL_CONTAINER_ID = 'artisan-chat';
+  // Below this the page has no column to give up, so an inline panel presents
+  // as the overlay. That switch is made in CSS on the container, never by
+  // moving the iframe: re-parenting a mounted iframe reloads it, and the
+  // visitor loses the conversation they are in the middle of.
+  const SIDE_PANEL_INLINE_MIN_WIDTH_PX = 900;
+  // The layout the last answer resolved to. Read only to place a returning
+  // visitor's early mount, which happens before the config round trip can say
+  // anything. A stale value costs one pageview in the wrong presentation and
+  // then heals, so it is never worth breaking the widget over.
+  const LAYOUT_CACHE_KEY_PREFIX = 'artisan-web-chat:layout:';
+
   // ---------------------------------------------------------------- config
   const resolveScript = () => {
     if (document.currentScript instanceof HTMLScriptElement) {
@@ -238,6 +264,7 @@
     ready: false,
     unread: 0,
     pinned: false,
+    placement: null,
     lastComparablePage: currentComparablePage(),
     lastHash: window.location.hash,
     hashNavigationTimer: null,
@@ -304,6 +331,29 @@
         max-width: 90vw; max-height: 100vh; border-radius: 0;
         box-shadow: -8px 0 32px rgba(20,16,40,0.16);
       }
+      /* Inline side panel: the customer's own placeholder div hosts the panel,
+         so it occupies real space in their layout and the page reflows around
+         it. The defaults suit a placeholder dropped into a flex or grid row;
+         everything lives on this one class, so customer CSS can override the
+         width or the docking outright. */
+      .artisan-web-chat-container {
+        position: sticky; top: 0; flex: 0 0 auto;
+        width: 421px; height: 100vh; box-sizing: border-box;
+      }
+      .artisan-web-chat-frame--inline {
+        position: static; width: 100%; height: 100%;
+        max-width: none; max-height: none;
+        border-radius: 0; box-shadow: none;
+      }
+      /* No room to split the page, so the inline panel presents as the overlay.
+         The container moves, the iframe stays exactly where it is. */
+      @media (max-width: ${SIDE_PANEL_INLINE_MIN_WIDTH_PX - 1}px) {
+        .artisan-web-chat-container {
+          position: fixed; top: 0; right: 0; bottom: 0;
+          width: 421px; max-width: 90vw; height: 100vh;
+          z-index: 2147483000;
+        }
+      }
       @media (prefers-reduced-motion: reduce) {
         .artisan-web-chat-launcher,
         .artisan-web-chat-frame,
@@ -311,6 +361,7 @@
       }
       .artisan-web-chat-launcher--hidden,
       .artisan-web-chat-badge--hidden,
+      .artisan-web-chat-container--hidden,
       .artisan-web-chat-frame--hidden { display: none !important; }
     `;
     document.head.appendChild(style);
@@ -367,6 +418,37 @@
     dom.iframe.src = iframeSrc;
   };
 
+  // Decides, once per pageview, where the pinned panel lives: inside the
+  // customer's placeholder div when they installed one, otherwise docked over
+  // the page as it has always been. Called from every signal that can tell us
+  // the org is pinned, and a no-op after the first.
+  //
+  // The `state.mounted` guard is the load-bearing one. An iframe that has been
+  // given a src reloads when it moves to another parent, which would throw away
+  // a live conversation, so a panel that already mounted stays where it is and
+  // takes the overlay. Before the src is assigned the frame is still
+  // about:blank and moving it costs nothing.
+  const ensureSidePanelPlacement = () => {
+    if (state.placement) {
+      return;
+    }
+    const container = document.getElementById(SIDE_PANEL_CONTAINER_ID);
+    if (!container || state.mounted || !dom.iframe) {
+      state.placement = 'overlay';
+      return;
+    }
+    state.placement = 'inline';
+    dom.container = container;
+    container.classList.add('artisan-web-chat-container');
+    container.appendChild(dom.iframe);
+    // The config can say pinned before the iframe reports its own layout, so the
+    // panel takes the inline presentation as soon as it has a home. Otherwise it
+    // would render at the floating panel's size inside the reserved column until
+    // the message lands.
+    dom.iframe.classList.add('artisan-web-chat-frame--inline');
+    dom.iframe.classList.remove('artisan-web-chat-frame--pinned');
+  };
+
   // Records that this visitor has the chat open, so the next page in the same
   // visit loads it without waiting for another click. Storage can be
   // unavailable (a blocked third-party context, a private window, a full quota)
@@ -384,6 +466,26 @@
     try {
       const openedAt = Number(window.localStorage.getItem(returningSessionKey));
       return openedAt > 0 && Date.now() - openedAt < RETURNING_SESSION_TTL_MS;
+    } catch {
+      return false;
+    }
+  };
+
+  // Remembers the resolved layout so the next pageview can place a returning
+  // visitor's early mount before the config answers. Same storage caveats as
+  // the session key above, and the same answer to them.
+  const layoutCacheKey = `${LAYOUT_CACHE_KEY_PREFIX}${siteKey}`;
+  const cacheLayout = (mode) => {
+    try {
+      window.localStorage.setItem(layoutCacheKey, mode);
+    } catch {
+      // Ignored: the next pageview just falls back to the overlay.
+    }
+  };
+
+  const cachedLayoutIsPinned = () => {
+    try {
+      return window.localStorage.getItem(layoutCacheKey) === LAYOUT.sidePanel;
     } catch {
       return false;
     }
@@ -432,8 +534,14 @@
   const applyLayout = (mode) => {
     const pinned = mode === LAYOUT.sidePanel;
     state.pinned = pinned;
+    cacheLayout(pinned ? LAYOUT.sidePanel : LAYOUT.floatingDialog);
+    if (pinned) {
+      ensureSidePanelPlacement();
+    }
+    const inline = pinned && state.placement === 'inline';
     dom.iframe.setAttribute('data-layout', pinned ? LAYOUT.sidePanel : LAYOUT.floatingDialog);
-    dom.iframe.classList.toggle('artisan-web-chat-frame--pinned', pinned);
+    dom.iframe.classList.toggle('artisan-web-chat-frame--pinned', pinned && !inline);
+    dom.iframe.classList.toggle('artisan-web-chat-frame--inline', inline);
     dom.launcher.classList.toggle('artisan-web-chat-launcher--hidden', pinned);
     dom.badge.classList.toggle('artisan-web-chat-badge--hidden', pinned);
     if (pinned) {
@@ -451,9 +559,13 @@
     dom.launcher?.classList.add('artisan-web-chat-launcher--hidden');
     dom.badge?.classList.add('artisan-web-chat-badge--hidden');
     dom.iframe?.classList.add('artisan-web-chat-frame--hidden');
+    // An inline panel also has to give the column back, or a page the widget
+    // does not serve keeps a 421px hole where the chat would have been.
+    dom.container?.classList.add('artisan-web-chat-container--hidden');
   };
 
   const show = () => {
+    dom.container?.classList.remove('artisan-web-chat-container--hidden');
     dom.iframe?.classList.remove('artisan-web-chat-frame--hidden');
     if (!state.pinned) {
       dom.launcher?.classList.remove('artisan-web-chat-launcher--hidden');
@@ -602,9 +714,17 @@
     if (typeof config.brandColor === 'string' && config.brandColor) {
       dom.launcher.style.background = config.brandColor;
     }
+    if (typeof config.chatLayout !== 'string' || !config.chatLayout) {
+      return;
+    }
+    const pinned = config.chatLayout === PINNED_CHAT_LAYOUT;
+    cacheLayout(pinned ? LAYOUT.sidePanel : LAYOUT.floatingDialog);
     // A pinned org has no launcher to click, so its panel is the page, and
-    // deferring it would render nothing at all.
-    if (config.chatLayout === PINNED_CHAT_LAYOUT) {
+    // deferring it would render nothing at all. Placing it before the mount
+    // also reserves the inline column now rather than when the iframe finishes
+    // booting, so the page settles once instead of shifting under the visitor.
+    if (pinned) {
+      ensureSidePanelPlacement();
       mountIframe();
     }
   };
@@ -629,7 +749,12 @@
     buildUi();
     dom.launcher.style.background = DEFAULT_BRAND_COLOR;
     // A visitor who is mid-conversation gets the chat back on the next page
-    // without waiting for the config round trip.
+    // without waiting for the config round trip. That mount has to know where
+    // it is going first: mounting into the body and learning the org is pinned
+    // a moment later would strand every returning visitor in the overlay.
+    if (cachedLayoutIsPinned()) {
+      ensureSidePanelPlacement();
+    }
     if (hasRecentSession()) {
       mountIframe();
     }
