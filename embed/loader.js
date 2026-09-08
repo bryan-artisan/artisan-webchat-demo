@@ -119,6 +119,23 @@
   // then heals, so it is never worth breaking the widget over.
   const LAYOUT_CACHE_KEY_PREFIX = 'artisan-web-chat:layout:';
 
+  // Welcome teaser. A visitor who never clicks the launcher never saw the
+  // opener at all, so the widget mounts itself once on a new visitor's first
+  // visible pageview and shows the message it gets back beside the launcher.
+  // The delay is the design's: long enough that the card is not part of the
+  // page load, short enough to still read as an answer to arriving.
+  const TEASER_DELAY_MS = 1600;
+  // Once this visitor has been greeted the loader is back to its lazy mount, so
+  // the extra bootstrap is once per visitor rather than once per pageview.
+  const TEASER_GREETED_KEY_PREFIX = 'artisan-web-chat:greeted:';
+  // Measured off the updated design: the card lands from a slight shrink on the
+  // same spring the panel opens with, anchored at the launcher.
+  const TEASER_ENTRANCE_SCALE = 0.9392;
+  const TEASER_ENTRANCE_MS = 267;
+  // The design clears the card first and the badge a beat later, so the count
+  // is still readable while the card is on its way out.
+  const BADGE_TRAIL_MS = 600;
+
   // ---------------------------------------------------------------- config
   const resolveScript = () => {
     if (document.currentScript instanceof HTMLScriptElement) {
@@ -268,15 +285,81 @@
     lastComparablePage: currentComparablePage(),
     lastHash: window.location.hash,
     hashNavigationTimer: null,
+    teaserTimer: null,
+    badgeTrailTimer: null,
   };
   const dom = {};
 
   // ---------------------------------------------------------------- UI build
+  // The welcome card that sits beside the launcher. Built empty and hidden; the
+  // text only ever arrives from the iframe's unread message, and it is written
+  // through textContent, so nothing the panel sends can put markup on the
+  // customer's page.
+  const buildTeaser = () => {
+    const teaser = document.createElement('div');
+    teaser.className = 'artisan-web-chat-teaser';
+    teaser.setAttribute('data-testid', 'webchat-teaser');
+    teaser.setAttribute('data-visible', 'false');
+
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'artisan-web-chat-teaser-card';
+    card.setAttribute('data-testid', 'webchat-teaser-card');
+
+    const avatar = document.createElement('img');
+    avatar.className = 'artisan-web-chat-teaser-avatar';
+    avatar.setAttribute('alt', '');
+    avatar.style.display = 'none';
+
+    const text = document.createElement('span');
+    text.className = 'artisan-web-chat-teaser-text';
+    const name = document.createElement('span');
+    name.className = 'artisan-web-chat-teaser-name';
+    const body = document.createElement('span');
+    body.className = 'artisan-web-chat-teaser-body';
+    text.appendChild(name);
+    text.appendChild(body);
+
+    card.appendChild(avatar);
+    card.appendChild(text);
+
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'artisan-web-chat-teaser-dismiss';
+    dismiss.setAttribute('data-testid', 'webchat-teaser-dismiss');
+    dismiss.setAttribute('aria-label', 'Dismiss message');
+    dismiss.innerHTML =
+      '<svg viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+      '<path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" stroke="currentColor" stroke-width="1.8" ' +
+      'stroke-linecap="round"/></svg>';
+
+    teaser.appendChild(card);
+    teaser.appendChild(dismiss);
+
+    dom.teaser = teaser;
+    dom.teaserCard = card;
+    dom.teaserAvatar = avatar;
+    dom.teaserName = name;
+    dom.teaserBody = body;
+
+    card.addEventListener('click', () => setOpen(true));
+    dismiss.addEventListener('click', dismissTeaser);
+    return teaser;
+  };
+
   const buildUi = () => {
     const style = document.createElement('style');
     style.textContent = `
+      /* The launcher and the welcome teaser sit on one row, so the card grows
+         to the left of the bubble and the pair keeps the 24px margin the
+         launcher always had. */
+      .artisan-web-chat-dock {
+        position: fixed; right: 24px; bottom: 24px;
+        display: flex; align-items: center; gap: 12px;
+        z-index: 2147483000;
+      }
       .artisan-web-chat-launcher {
-        position: fixed; right: 24px; bottom: 24px; width: 59px; height: 59px;
+        position: relative; flex: 0 0 auto; width: 59px; height: 59px;
         box-sizing: border-box; padding: 0;
         border-radius: 50%; border: none; cursor: pointer; color: #fff;
         background: #682fc5; box-shadow: 0 8px 24px rgba(20,16,40,0.28);
@@ -290,14 +373,62 @@
       .artisan-web-chat-launcher .artisan-web-chat-launcher-close,
       .artisan-web-chat-launcher[data-open="true"] .artisan-web-chat-launcher-open { display: none; }
       .artisan-web-chat-launcher[data-open="true"] .artisan-web-chat-launcher-close { display: block; }
+      /* The count rides the launcher itself, overlapping its top-right edge, so
+         it stays put whether or not the teaser card is beside it. */
       .artisan-web-chat-badge {
-        position: fixed; right: 16px; bottom: 60px; min-width: 20px; height: 20px;
-        padding: 0 6px; border-radius: 10px; background: #dc2626; color: #fff;
-        font: 700 12px/20px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        text-align: center; z-index: 2147483001; display: none; pointer-events: none;
+        position: absolute; top: -2px; right: -2px; min-width: 18px; height: 18px;
+        padding: 0 5px; box-sizing: border-box; border-radius: 9px;
+        background: rgb(204,48,24); color: #fff;
+        font: 700 11px/18px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font-variant-numeric: tabular-nums;
+        text-align: center; display: none; pointer-events: none;
         box-shadow: 0 2px 8px rgba(0,0,0,0.2);
       }
       .artisan-web-chat-badge[data-visible="true"] { display: block; }
+      /* Welcome teaser (v034). The card carries the opener beside the collapsed
+         launcher, so a visitor who never clicks still reads what Ava said. */
+      .artisan-web-chat-teaser {
+        position: relative; display: none;
+      }
+      .artisan-web-chat-teaser[data-visible="true"] { display: block; }
+      .artisan-web-chat-teaser-card {
+        display: flex; align-items: center; gap: 10px; width: 296px;
+        box-sizing: border-box; padding: 11px 14px; text-align: left;
+        border-radius: 16px; border: 1px solid rgba(20,16,40,0.08);
+        background: #fff; color: #1a1523; cursor: pointer;
+        box-shadow: 0 12px 32px rgba(20,16,40,0.16), 0 2px 6px rgba(20,16,40,0.08);
+        transform: scale(${TEASER_ENTRANCE_SCALE}); transform-origin: right center;
+        transition: transform ${TEASER_ENTRANCE_MS}ms ${SPRING_EASING};
+      }
+      .artisan-web-chat-teaser[data-visible="true"] .artisan-web-chat-teaser-card {
+        transform: scale(1);
+      }
+      .artisan-web-chat-teaser-avatar {
+        width: 32px; height: 32px; flex: 0 0 auto; border-radius: 50%;
+        object-fit: cover; background: rgba(20,16,40,0.06);
+      }
+      .artisan-web-chat-teaser-text { min-width: 0; }
+      .artisan-web-chat-teaser-name {
+        display: block;
+        font: 600 12px/16px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      }
+      .artisan-web-chat-teaser-body {
+        display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        font: 400 12px/16px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        color: rgba(26,21,35,0.72);
+      }
+      /* Dismiss stays out of the way until the visitor reaches for the card,
+         which is why the card itself is the big target and this is not. */
+      .artisan-web-chat-teaser-dismiss {
+        position: absolute; top: -7px; left: -7px; width: 22px; height: 22px;
+        padding: 0; border-radius: 50%; border: 1px solid rgba(20,16,40,0.08);
+        background: #fff; color: #1a1523; cursor: pointer; line-height: 1;
+        opacity: 0; transition: opacity 140ms ease;
+        box-shadow: 0 2px 6px rgba(20,16,40,0.16);
+      }
+      .artisan-web-chat-teaser:hover .artisan-web-chat-teaser-dismiss,
+      .artisan-web-chat-teaser:focus-within .artisan-web-chat-teaser-dismiss { opacity: 1; }
+      .artisan-web-chat-teaser-dismiss svg { width: 10px; height: 10px; display: block; margin: auto; }
       /* The panel stays in the layout so opening and closing it can animate.
          Closed it is visibility:hidden, which keeps it out of the tab order and
          the accessibility tree exactly as display:none did, and the visibility
@@ -356,9 +487,12 @@
       }
       @media (prefers-reduced-motion: reduce) {
         .artisan-web-chat-launcher,
+        .artisan-web-chat-teaser-card,
         .artisan-web-chat-frame,
         .artisan-web-chat-frame[data-open="true"] { transition: none; }
+        .artisan-web-chat-teaser-card { transform: scale(1); }
       }
+      .artisan-web-chat-dock--hidden,
       .artisan-web-chat-launcher--hidden,
       .artisan-web-chat-badge--hidden,
       .artisan-web-chat-container--hidden,
@@ -387,6 +521,13 @@
     badge.setAttribute('data-testid', 'webchat-unread-badge');
     badge.setAttribute('data-visible', 'false');
     badge.setAttribute('aria-hidden', 'true');
+    launcher.appendChild(badge);
+
+    const dock = document.createElement('div');
+    dock.className = 'artisan-web-chat-dock';
+    dock.setAttribute('data-testid', 'webchat-dock');
+    dock.appendChild(buildTeaser());
+    dock.appendChild(launcher);
 
     const iframe = document.createElement('iframe');
     iframe.className = 'artisan-web-chat-frame';
@@ -395,10 +536,10 @@
     iframe.setAttribute('title', 'Chat');
     iframe.setAttribute('allow', 'microphone; camera; autoplay');
 
-    document.body.appendChild(launcher);
-    document.body.appendChild(badge);
+    document.body.appendChild(dock);
     document.body.appendChild(iframe);
 
+    dom.dock = dock;
     dom.launcher = launcher;
     dom.badge = badge;
     dom.iframe = iframe;
@@ -491,10 +632,95 @@
     }
   };
 
+  // This visitor has already been shown the opener, so the loader is back to
+  // mounting only when someone asks for the chat. Without it every pageview of
+  // the same visit would pay for another bootstrap.
+  const greetedKey = `${TEASER_GREETED_KEY_PREFIX}${siteKey}`;
+  const hasGreeted = () => {
+    try {
+      return window.localStorage.getItem(greetedKey) === '1';
+    } catch {
+      return false;
+    }
+  };
+
+  const markGreeted = () => {
+    try {
+      window.localStorage.setItem(greetedKey, '1');
+    } catch {
+      // Ignored: the worst case is one more early mount on the next page.
+    }
+  };
+
   const renderBadge = () => {
-    const visible = !state.open && state.unread > 0;
+    // While the count is trailing a dismissed card it stays up even though the
+    // panel is open, which is the beat the design holds it for.
+    const trailing = state.badgeTrailTimer !== null;
+    const visible = state.unread > 0 && (trailing || !state.open);
     dom.badge.setAttribute('data-visible', String(visible));
     dom.badge.textContent = state.unread > 9 ? '9+' : String(state.unread);
+    dom.badge.setAttribute('aria-label', `${state.unread} unread`);
+  };
+
+  const cancelTeaserTimer = () => {
+    if (state.teaserTimer === null) {
+      return;
+    }
+    clearTimeout(state.teaserTimer);
+    state.teaserTimer = null;
+  };
+
+  const teaserIsVisible = () => dom.teaser?.getAttribute('data-visible') === 'true';
+
+  const hideTeaser = () => {
+    dom.teaser?.setAttribute('data-visible', 'false');
+  };
+
+  // The card goes first and the count follows a beat later, so the visitor can
+  // still read what they are leaving behind while the card animates out.
+  const clearBadgeAfterTeaser = () => {
+    if (state.badgeTrailTimer !== null) {
+      return;
+    }
+    state.badgeTrailTimer = setTimeout(() => {
+      state.badgeTrailTimer = null;
+      state.unread = 0;
+      renderBadge();
+    }, BADGE_TRAIL_MS);
+  };
+
+  const dismissTeaser = () => {
+    cancelTeaserTimer();
+    markGreeted();
+    if (!teaserIsVisible()) {
+      return;
+    }
+    hideTeaser();
+    clearBadgeAfterTeaser();
+  };
+
+  // Paints the card from the turn the iframe sent beside the count. An entry
+  // with no text is nothing to show, and a panel that is already open has
+  // nothing to tease.
+  const renderTeaser = (latest) => {
+    const showable = Boolean(dom.teaser) && !state.open && Boolean(latest?.text);
+    if (!showable) {
+      return;
+    }
+    const senderName = typeof latest.senderName === 'string' ? latest.senderName : '';
+    dom.teaserName.textContent = senderName;
+    dom.teaserName.style.display = senderName ? 'block' : 'none';
+    dom.teaserBody.textContent = latest.text;
+    const avatarUrl = typeof latest.avatarUrl === 'string' ? latest.avatarUrl : '';
+    dom.teaserAvatar.style.display = avatarUrl ? 'block' : 'none';
+    if (avatarUrl) {
+      dom.teaserAvatar.src = avatarUrl;
+    }
+    dom.teaserCard.setAttribute(
+      'aria-label',
+      senderName ? `Message from ${senderName}: ${latest.text}` : `Message: ${latest.text}`
+    );
+    dom.teaser.setAttribute('data-visible', 'true');
   };
 
   const postToIframe = (message) => {
@@ -508,6 +734,17 @@
     }
   };
 
+  // Opening reads everything, so the count goes. When the welcome card was up
+  // the count trails it instead of vanishing with it.
+  const clearUnreadOnOpen = () => {
+    if (!teaserIsVisible()) {
+      state.unread = 0;
+      return;
+    }
+    hideTeaser();
+    clearBadgeAfterTeaser();
+  };
+
   const setOpen = (open) => {
     // The side panel is always present, so a close never collapses it.
     if (state.pinned && !open) {
@@ -516,13 +753,15 @@
     if (open) {
       mountIframe();
       markSessionOpen();
+      markGreeted();
+      cancelTeaserTimer();
     }
     state.open = open;
     dom.iframe.setAttribute('data-open', String(open));
     dom.launcher.setAttribute('data-open', String(open));
     dom.launcher.setAttribute('aria-label', open ? 'Close chat' : 'Open chat');
     if (open) {
-      state.unread = 0;
+      clearUnreadOnOpen();
     }
     renderBadge();
     postToIframe({ type: MESSAGE.visibility, open });
@@ -542,9 +781,12 @@
     dom.iframe.setAttribute('data-layout', pinned ? LAYOUT.sidePanel : LAYOUT.floatingDialog);
     dom.iframe.classList.toggle('artisan-web-chat-frame--pinned', pinned && !inline);
     dom.iframe.classList.toggle('artisan-web-chat-frame--inline', inline);
+    dom.dock.classList.toggle('artisan-web-chat-dock--hidden', pinned);
     dom.launcher.classList.toggle('artisan-web-chat-launcher--hidden', pinned);
     dom.badge.classList.toggle('artisan-web-chat-badge--hidden', pinned);
     if (pinned) {
+      cancelTeaserTimer();
+      hideTeaser();
       setOpen(true);
     }
   };
@@ -556,6 +798,11 @@
   // once a later navigation brings the page back into scope. Respects the
   // side-panel layout, which already hides the launcher/badge on its own.
   const hide = () => {
+    // A page the widget does not serve must not sprout a welcome card a second
+    // later either, so the pending mount goes with the chrome.
+    cancelTeaserTimer();
+    hideTeaser();
+    dom.dock?.classList.add('artisan-web-chat-dock--hidden');
     dom.launcher?.classList.add('artisan-web-chat-launcher--hidden');
     dom.badge?.classList.add('artisan-web-chat-badge--hidden');
     dom.iframe?.classList.add('artisan-web-chat-frame--hidden');
@@ -568,6 +815,7 @@
     dom.container?.classList.remove('artisan-web-chat-container--hidden');
     dom.iframe?.classList.remove('artisan-web-chat-frame--hidden');
     if (!state.pinned) {
+      dom.dock?.classList.remove('artisan-web-chat-dock--hidden');
       dom.launcher?.classList.remove('artisan-web-chat-launcher--hidden');
       dom.badge?.classList.remove('artisan-web-chat-badge--hidden');
     }
@@ -670,6 +918,11 @@
     }
     if (data.type === MESSAGE.unread) {
       state.unread = typeof data.count === 'number' ? data.count : 0;
+      if (state.unread === 0) {
+        hideTeaser();
+      } else {
+        renderTeaser(data.latest);
+      }
       renderBadge();
       return;
     }
@@ -703,6 +956,21 @@
     }
   };
 
+  // One bootstrap on a new visitor's first visible pageview, which is what pays
+  // for the welcome card: the iframe loads, the opener arrives on the unread
+  // message, and the card shows it. A greeted visitor, a visitor already in a
+  // session, and a background tab all keep today's lazy mount.
+  const scheduleTeaserMount = () => {
+    const wantsTeaser = !state.mounted && !hasGreeted() && !hasRecentSession();
+    if (!wantsTeaser || document.visibilityState !== 'visible') {
+      return;
+    }
+    state.teaserTimer = setTimeout(() => {
+      state.teaserTimer = null;
+      mountIframe();
+    }, TEASER_DELAY_MS);
+  };
+
   const applyLoaderConfig = (config) => {
     if (!config || typeof config !== 'object') {
       return;
@@ -715,18 +983,21 @@
       dom.launcher.style.background = config.brandColor;
     }
     if (typeof config.chatLayout !== 'string' || !config.chatLayout) {
+      scheduleTeaserMount();
       return;
     }
     const pinned = config.chatLayout === PINNED_CHAT_LAYOUT;
     cacheLayout(pinned ? LAYOUT.sidePanel : LAYOUT.floatingDialog);
+    if (!pinned) {
+      scheduleTeaserMount();
+      return;
+    }
     // A pinned org has no launcher to click, so its panel is the page, and
     // deferring it would render nothing at all. Placing it before the mount
     // also reserves the inline column now rather than when the iframe finishes
     // booting, so the page settles once instead of shifting under the visitor.
-    if (pinned) {
-      ensureSidePanelPlacement();
-      mountIframe();
-    }
+    ensureSidePanelPlacement();
+    mountIframe();
   };
 
   // Never blocks the launcher. The whole answer is an optimization plus some
