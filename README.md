@@ -179,11 +179,10 @@ To use it:
 1. Sign in at the embed origin (`https://app-inbound.dev.artisan.co`) with an
    account that belongs to the organization that owns the site key in
    `config.js`. The picker refuses anyone else.
-2. Open this page once with `#visit-as` on the URL. That is the only way to
-   summon the pill the first time; after a successful pick it comes back on its
-   own.
-3. Click the pill. The first time, a window opens and closes on its own to
-   unlock the picker. Then search for a person in the panel and pick one, and
+2. Open this page. The pill sits in the bottom-left corner on every visit.
+3. Click the pill. Until you have signed in, the panel explains that it needs an
+   Artisan session and offers a sign-in button, which opens one window that
+   closes on its own. Then search for a person in the panel and pick one, and
    this page reloads itself.
 
 Picking a person seeds a fresh `website_visitor` row with a new Vector `up_id`

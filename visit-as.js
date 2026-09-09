@@ -17,6 +17,14 @@
     return;
   }
 
+  // These elements carry an inline `display:flex`, which outranks the user-agent
+  // rule behind the `hidden` attribute, so `el.hidden = true` alone leaves them
+  // on screen. This rule restores what the toggles below already assume.
+  const FACE_ATTR = 'data-visit-as-face';
+  const faceStyle = document.createElement('style');
+  faceStyle.textContent = `[${FACE_ATTR}][hidden]{display:none!important}`;
+  document.head.appendChild(faceStyle);
+
   const STORAGE_KEY = 'artisan_visit_as';
   const TOKEN_STORAGE_KEY = 'artisan_visit_as_token';
   const COOKIE_NAME = 'vector_up_id';
@@ -29,21 +37,6 @@
   // iframe URL, so a cookie written after the widget has loaded reaches nothing.
   // Reloading is what puts the new identity in front of the widget.
   const RELOAD_DELAY_MS = 400;
-
-  const wantsPicker = () => {
-    if (window.location.hash.indexOf('visit-as') !== -1) {
-      return true;
-    }
-    try {
-      return window.localStorage.getItem(STORAGE_KEY) !== null;
-    } catch (error) {
-      return false;
-    }
-  };
-
-  if (!wantsPicker()) {
-    return;
-  }
 
   const readStorage = (key) => {
     try {
@@ -109,6 +102,7 @@
   ].join(';');
 
   const panel = document.createElement('div');
+  panel.setAttribute(FACE_ATTR, '');
   panel.hidden = true;
   panel.style.cssText = [
     'position:fixed',
@@ -153,10 +147,42 @@
   const results = document.createElement('div');
   results.style.cssText = 'overflow-y:auto;display:flex;flex-direction:column;gap:2px';
 
+  // The picker needs an Artisan session before it can search, and this page's
+  // origin can never carry that cookie. So the panel has two faces: a sign-in
+  // prompt until a token has been handed over, and the search box after.
+  const searchFace = document.createElement('div');
+  searchFace.setAttribute(FACE_ATTR, '');
+  searchFace.style.cssText = 'display:flex;flex-direction:column;gap:8px;min-height:0';
+  searchFace.appendChild(input);
+  searchFace.appendChild(hint);
+  searchFace.appendChild(results);
+
+  const authFace = document.createElement('div');
+  authFace.setAttribute(FACE_ATTR, '');
+  authFace.style.cssText = 'display:flex;flex-direction:column;gap:8px';
+
+  const authMessage = document.createElement('div');
+  authMessage.style.cssText = 'color:#6b6b7b';
+
+  const authButton = document.createElement('button');
+  authButton.type = 'button';
+  authButton.textContent = 'Sign in to Artisan';
+  authButton.style.cssText = [
+    'padding:8px 10px',
+    'border-radius:8px',
+    'border:1px solid #12121a',
+    'background:#12121a',
+    'color:#ffffff',
+    'font:500 13px/1.2 inherit',
+    'cursor:pointer',
+  ].join(';');
+
+  authFace.appendChild(authMessage);
+  authFace.appendChild(authButton);
+
   panel.appendChild(panelTitle);
-  panel.appendChild(input);
-  panel.appendChild(hint);
-  panel.appendChild(results);
+  panel.appendChild(authFace);
+  panel.appendChild(searchFace);
 
   const setHint = (text) => {
     hint.textContent = text;
@@ -172,6 +198,25 @@
     panel.hidden = true;
   };
 
+  const refreshPill = () => {
+    const rememberedName = readStorage(STORAGE_KEY) || '';
+    const identity = rememberedName ? `Visiting as ${rememberedName}` : 'Visit as…';
+    pill.textContent = session ? identity : `${identity} · sign in`;
+  };
+
+  const showAuthFace = (message) => {
+    authMessage.textContent = message;
+    authFace.hidden = false;
+    searchFace.hidden = true;
+    refreshPill();
+  };
+
+  const showSearchFace = () => {
+    authFace.hidden = true;
+    searchFace.hidden = false;
+    refreshPill();
+  };
+
   const dropSession = () => {
     session = null;
     dropStorage(TOKEN_STORAGE_KEY);
@@ -181,17 +226,22 @@
     if (!session) {
       throw new Error('no session');
     }
-    const response = await fetch(`${session.apiBaseUrl}${path}`, {
-      method: options.method,
-      headers: Object.assign({ Authorization: `Bearer ${session.token}` }, options.headers || {}),
-      body: options.body,
-    });
+    let response;
+    try {
+      response = await fetch(`${session.apiBaseUrl}${path}`, {
+        method: options.method,
+        headers: Object.assign({ Authorization: `Bearer ${session.token}` }, options.headers || {}),
+        body: options.body,
+      });
+    } catch (error) {
+      throw new Error('unreachable');
+    }
     if (response.status === 401 || response.status === 403) {
       dropSession();
       throw new Error('expired');
     }
     if (!response.ok) {
-      throw new Error(`request failed: ${response.status}`);
+      throw new Error('unreachable');
     }
     const payload = await response.json();
     return payload.data;
@@ -212,8 +262,11 @@
       window.setTimeout(() => window.location.reload(), RELOAD_DELAY_MS);
     } catch (error) {
       if (error.message === 'expired') {
-        closePanel();
-        openHandshake();
+        showAuthFace('Your Artisan session expired. Sign in again to keep picking people.');
+        return;
+      }
+      if (error.message === 'unreachable') {
+        setHint('We could not reach Artisan, so that identity was not set. Try again in a moment.');
         return;
       }
       setHint('We could not set that identity. Try another person.');
@@ -287,12 +340,16 @@
         return;
       }
       if (error.message === 'expired') {
-        closePanel();
-        openHandshake();
+        clearResults();
+        showAuthFace('Your Artisan session expired. Sign in again to search people.');
         return;
       }
       clearResults();
-      setHint('We could not search people for this organization.');
+      setHint(
+        error.message === 'unreachable'
+          ? 'We could not reach Artisan. Check that the app is up, then try again.'
+          : 'We could not search people for this organization.'
+      );
     }
   };
 
@@ -312,8 +369,15 @@
     panel.hidden = false;
     clearResults();
     input.value = '';
+    if (!session) {
+      showAuthFace(
+        'This picker reads people from your Artisan organization, so it needs you signed in to the Artisan app. Signing in opens one window and only has to happen once.'
+      );
+      return;
+    }
+    showSearchFace();
     setHint(
-      session && session.orgName
+      session.orgName
         ? `Pick someone from ${session.orgName}.`
         : `Type at least ${MIN_QUERY_LENGTH} characters to search.`
     );
@@ -322,8 +386,22 @@
 
   function openHandshake() {
     const url = `${embedOrigin}/visit-as?siteKey=${encodeURIComponent(siteKey)}&origin=${encodeURIComponent(window.location.origin)}`;
-    window.open(url, 'artisan-visit-as', POPUP_FEATURES);
+    // A blocked pop-up returns null, and without this the click looks like it
+    // did nothing at all.
+    const handshakeWindow = window.open(url, 'artisan-visit-as', POPUP_FEATURES);
+    if (!handshakeWindow) {
+      showAuthFace(
+        'Your browser blocked the sign-in window. Allow pop-ups for this page, then try again.'
+      );
+      return;
+    }
+    handshakeWindow.focus();
   }
+
+  authButton.addEventListener('click', () => {
+    authMessage.textContent = 'Waiting for the Artisan sign-in window…';
+    openHandshake();
+  });
 
   pill.addEventListener('click', () => {
     if (!panel.hidden) {
@@ -331,11 +409,7 @@
       return;
     }
     session = readToken();
-    if (session) {
-      openPanel();
-      return;
-    }
-    openHandshake();
+    openPanel();
   });
 
   window.addEventListener('message', (event) => {
@@ -350,8 +424,11 @@
     if (data.type === 'artisan-visit-as-denied') {
       dropSession();
       dropStorage(STORAGE_KEY);
-      panel.remove();
-      pill.remove();
+      clearResults();
+      panel.hidden = false;
+      showAuthFace(
+        'That Artisan account is not a member of the organization behind this page, so there is nobody to visit as.'
+      );
       return;
     }
 
@@ -369,8 +446,7 @@
     openPanel();
   });
 
-  const rememberedName = readStorage(STORAGE_KEY) || '';
-  pill.textContent = rememberedName ? `Visiting as ${rememberedName}` : 'Visit as…';
+  refreshPill();
 
   document.body.appendChild(panel);
   document.body.appendChild(pill);
