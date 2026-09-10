@@ -72,6 +72,17 @@
   // shorter, plain ease so a dismissal never feels bouncy. Both are declared
   // here rather than inline so the closing duration and the delay on the
   // visibility switch cannot drift apart.
+  // Everything the loader paints on the host page is chrome for the widget, so
+  // it uses the product font rather than whatever the host's UI font happens to
+  // be. No webfont is loaded here, so the system fallbacks stay behind Inter for
+  // a host that does not already have it.
+  const UI_FONT_STACK = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  // The design's launcher is a 56px circle. A fully round value beats 50% so the
+  // shape survives a badge or a glyph changing the box.
+  const LAUNCHER_SIZE_PX = 56;
+  const LAUNCHER_GLYPH_PX = 24;
+  const FULLY_ROUND_RADIUS_PX = 999;
+
   const SPRING_EASING = 'cubic-bezier(0.34, 1.56, 0.64, 1)';
   const OPEN_DURATION_MS = 340;
   const CLOSE_DURATION_MS = 200;
@@ -281,11 +292,23 @@
     ready: false,
     unread: 0,
     pinned: false,
+    // A pinned panel the visitor collapsed. Deliberately in memory only: the
+    // loader caches the resolved layout in localStorage, and persisting a
+    // collapse there would mean the panel a customer bought never comes back
+    // on any later pageview.
+    pinnedCollapsed: false,
+    // The widget is scoped to other pages, so the host-page chrome is off and
+    // must stay off until a later navigation brings this page back in scope.
+    outOfScope: false,
     placement: null,
     lastComparablePage: currentComparablePage(),
     lastHash: window.location.hash,
     hashNavigationTimer: null,
     teaserTimer: null,
+    // True while the iframe is mounted but the card is not due yet, with the
+    // opener it sent held in `pendingTeaser` until the timer opens the gate.
+    teaserGated: false,
+    pendingTeaser: null,
     badgeTrailTimer: null,
   };
   const dom = {};
@@ -359,15 +382,16 @@
         z-index: 2147483000;
       }
       .artisan-web-chat-launcher {
-        position: relative; flex: 0 0 auto; width: 59px; height: 59px;
-        box-sizing: border-box; padding: 0;
-        border-radius: 50%; border: none; cursor: pointer; color: #fff;
+        position: relative; flex: 0 0 auto;
+        width: ${LAUNCHER_SIZE_PX}px; height: ${LAUNCHER_SIZE_PX}px;
+        box-sizing: border-box; padding: 0; font-family: ${UI_FONT_STACK};
+        border-radius: ${FULLY_ROUND_RADIUS_PX}px; border: none; cursor: pointer; color: #fff;
         background: #682fc5; box-shadow: 0 8px 24px rgba(20,16,40,0.28);
         display: flex; align-items: center; justify-content: center;
         z-index: 2147483000; transition: transform 0.15s ease;
       }
       .artisan-web-chat-launcher:hover { transform: scale(1.05); }
-      .artisan-web-chat-launcher svg { width: 28px; height: 28px; }
+      .artisan-web-chat-launcher svg { width: ${LAUNCHER_GLYPH_PX}px; height: ${LAUNCHER_GLYPH_PX}px; }
       /* The glyph tracks the panel: a chat bubble to open it, a chevron down to
          put it away, so the control says what pressing it will do. */
       .artisan-web-chat-launcher .artisan-web-chat-launcher-close,
@@ -377,9 +401,9 @@
          it stays put whether or not the teaser card is beside it. */
       .artisan-web-chat-badge {
         position: absolute; top: -2px; right: -2px; min-width: 18px; height: 18px;
-        padding: 0 5px; box-sizing: border-box; border-radius: 9px;
+        padding: 0 5px; box-sizing: border-box; border-radius: ${FULLY_ROUND_RADIUS_PX}px;
         background: rgb(204,48,24); color: #fff;
-        font: 700 11px/18px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font: 700 11px/18px ${UI_FONT_STACK};
         font-variant-numeric: tabular-nums;
         text-align: center; display: none; pointer-events: none;
         box-shadow: 0 2px 8px rgba(0,0,0,0.2);
@@ -394,6 +418,7 @@
       .artisan-web-chat-teaser-card {
         display: flex; align-items: center; gap: 10px; width: 296px;
         box-sizing: border-box; padding: 11px 14px; text-align: left;
+        font-family: ${UI_FONT_STACK};
         border-radius: 16px; border: 1px solid rgba(20,16,40,0.08);
         background: #fff; color: #1a1523; cursor: pointer;
         box-shadow: 0 12px 32px rgba(20,16,40,0.16), 0 2px 6px rgba(20,16,40,0.08);
@@ -410,11 +435,11 @@
       .artisan-web-chat-teaser-text { min-width: 0; }
       .artisan-web-chat-teaser-name {
         display: block;
-        font: 600 12px/16px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font: 600 12px/16px ${UI_FONT_STACK};
       }
       .artisan-web-chat-teaser-body {
         display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-        font: 400 12px/16px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font: 400 12px/16px ${UI_FONT_STACK};
         color: rgba(26,21,35,0.72);
       }
       /* Dismiss stays out of the way until the visitor reaches for the card,
@@ -455,12 +480,21 @@
           opacity 160ms ease-out,
           visibility 0s;
       }
-      /* Side-panel (pinned) layout: a full-height panel docked to the right edge,
-         always present. No launcher, no floating box, no rounded corners. */
+      /* Side-panel (pinned) layout: a full-height panel docked to the right edge.
+         No floating box and no rounded corners. The launcher is hidden while the
+         panel is open and comes back as the affordance that restores it. */
       .artisan-web-chat-frame--pinned {
         top: 0; right: 0; bottom: 0; width: 421px; height: 100vh;
         max-width: 90vw; max-height: 100vh; border-radius: 0;
         box-shadow: -8px 0 32px rgba(20,16,40,0.16);
+        /* A full-height panel does not belong to a corner, so it leaves and
+           returns along its own edge instead of taking the floating box's
+           bottom-right pop. These override the shared open/closed transforms,
+           which is why they sit after them. */
+        transform: translateX(100%);
+      }
+      .artisan-web-chat-frame--pinned[data-open="true"] {
+        transform: translateX(0);
       }
       /* Inline side panel: the customer's own placeholder div hosts the panel,
          so it occupies real space in their layout and the page reflows around
@@ -470,7 +504,13 @@
       .artisan-web-chat-container {
         position: sticky; top: 0; flex: 0 0 auto;
         width: 421px; height: 100vh; box-sizing: border-box;
+        overflow: hidden;
+        transition: width ${CLOSE_DURATION_MS}ms ease-in;
       }
+      /* Collapsed inline panel: the reserved column goes to zero so the host
+         page reflows and takes its width back. Hiding it outright would give
+         the width back too, without the panel visibly leaving. */
+      .artisan-web-chat-container--collapsed { width: 0; }
       .artisan-web-chat-frame--inline {
         position: static; width: 100%; height: 100%;
         max-width: none; max-height: none;
@@ -635,10 +675,16 @@
   // This visitor has already been shown the opener, so the loader is back to
   // mounting only when someone asks for the chat. Without it every pageview of
   // the same visit would pay for another bootstrap.
+  // It expires with the visit, on the same window as the returning-session key,
+  // so a visitor coming back days later meets a new conversation's opener the
+  // way a first-time visitor does. A value written before this carried a TTL
+  // reads as expired, which costs that visitor one extra greeting and nothing
+  // else.
   const greetedKey = `${TEASER_GREETED_KEY_PREFIX}${siteKey}`;
   const hasGreeted = () => {
     try {
-      return window.localStorage.getItem(greetedKey) === '1';
+      const greetedAt = Number(window.localStorage.getItem(greetedKey));
+      return greetedAt > 0 && Date.now() - greetedAt < RETURNING_SESSION_TTL_MS;
     } catch {
       return false;
     }
@@ -646,7 +692,7 @@
 
   const markGreeted = () => {
     try {
-      window.localStorage.setItem(greetedKey, '1');
+      window.localStorage.setItem(greetedKey, String(Date.now()));
     } catch {
       // Ignored: the worst case is one more early mount on the next page.
     }
@@ -663,11 +709,12 @@
   };
 
   const cancelTeaserTimer = () => {
-    if (state.teaserTimer === null) {
-      return;
+    if (state.teaserTimer !== null) {
+      clearTimeout(state.teaserTimer);
+      state.teaserTimer = null;
     }
-    clearTimeout(state.teaserTimer);
-    state.teaserTimer = null;
+    state.teaserGated = false;
+    state.pendingTeaser = null;
   };
 
   const teaserIsVisible = () => dom.teaser?.getAttribute('data-visible') === 'true';
@@ -705,6 +752,13 @@
   const renderTeaser = (latest) => {
     const showable = Boolean(dom.teaser) && !state.open && Boolean(latest?.text);
     if (!showable) {
+      return;
+    }
+    // The iframe now mounts at once, so an opener can land well before the card
+    // is due. It waits here rather than painting early, which is what keeps the
+    // card's own entrance on the design's beat.
+    if (state.teaserGated) {
+      state.pendingTeaser = latest;
       return;
     }
     const senderName = typeof latest.senderName === 'string' ? latest.senderName : '';
@@ -746,9 +800,13 @@
   };
 
   const setOpen = (open) => {
-    // The side panel is always present, so a close never collapses it.
-    if (state.pinned && !open) {
-      return;
+    // Closing a pinned panel collapses it to the same launcher the floating
+    // layout uses, rather than being refused. The panel used to be
+    // unconditionally present, so the X inside it posted a close that this
+    // function threw away and nothing on screen moved.
+    if (state.pinned) {
+      state.pinnedCollapsed = !open;
+      applyHostChrome();
     }
     if (open) {
       mountIframe();
@@ -767,12 +825,32 @@
     postToIframe({ type: MESSAGE.visibility, open });
   };
 
+  // The launcher, its dock and the unread badge are shown or hidden by three
+  // separate things now: the resolved layout, whether a pinned panel is
+  // collapsed, and whether the widget serves this page at all. Every one of
+  // them routes through here so they cannot disagree, which is what used to
+  // happen when `show()` restored chrome that the layout wanted hidden.
+  const applyHostChrome = () => {
+    const collapsed = state.pinned && state.pinnedCollapsed;
+    const launcherVisible = !state.outOfScope && (!state.pinned || collapsed);
+    dom.dock?.classList.toggle('artisan-web-chat-dock--hidden', !launcherVisible);
+    dom.launcher?.classList.toggle('artisan-web-chat-launcher--hidden', !launcherVisible);
+    dom.badge?.classList.toggle('artisan-web-chat-badge--hidden', !launcherVisible);
+    dom.container?.classList.toggle('artisan-web-chat-container--collapsed', collapsed);
+  };
+
   // Present the host-page shell for the resolved layout. `side-panel` docks the
-  // iframe full-height at the right edge and hides the launcher (the panel is
-  // always open); `floating-dialog` keeps the launcher + floating box.
+  // iframe full-height at the right edge and shows the launcher only while the
+  // panel is collapsed; `floating-dialog` keeps the launcher + floating box.
   const applyLayout = (mode) => {
     const pinned = mode === LAYOUT.sidePanel;
     state.pinned = pinned;
+    if (!pinned) {
+      // A console switch back to the floating widget must not leave a collapse
+      // from the earlier pinned layout behind, or flipping to the side panel
+      // again in the same pageview would open it already collapsed.
+      state.pinnedCollapsed = false;
+    }
     cacheLayout(pinned ? LAYOUT.sidePanel : LAYOUT.floatingDialog);
     if (pinned) {
       ensureSidePanelPlacement();
@@ -781,10 +859,8 @@
     dom.iframe.setAttribute('data-layout', pinned ? LAYOUT.sidePanel : LAYOUT.floatingDialog);
     dom.iframe.classList.toggle('artisan-web-chat-frame--pinned', pinned && !inline);
     dom.iframe.classList.toggle('artisan-web-chat-frame--inline', inline);
-    dom.dock.classList.toggle('artisan-web-chat-dock--hidden', pinned);
-    dom.launcher.classList.toggle('artisan-web-chat-launcher--hidden', pinned);
-    dom.badge.classList.toggle('artisan-web-chat-badge--hidden', pinned);
-    if (pinned) {
+    applyHostChrome();
+    if (pinned && !state.pinnedCollapsed) {
       cancelTeaserTimer();
       hideTeaser();
       setOpen(true);
@@ -799,12 +875,11 @@
   // side-panel layout, which already hides the launcher/badge on its own.
   const hide = () => {
     // A page the widget does not serve must not sprout a welcome card a second
-    // later either, so the pending mount goes with the chrome.
+    // later either, so the pending card goes with the chrome.
     cancelTeaserTimer();
     hideTeaser();
-    dom.dock?.classList.add('artisan-web-chat-dock--hidden');
-    dom.launcher?.classList.add('artisan-web-chat-launcher--hidden');
-    dom.badge?.classList.add('artisan-web-chat-badge--hidden');
+    state.outOfScope = true;
+    applyHostChrome();
     dom.iframe?.classList.add('artisan-web-chat-frame--hidden');
     // An inline panel also has to give the column back, or a page the widget
     // does not serve keeps a 421px hole where the chat would have been.
@@ -812,13 +887,10 @@
   };
 
   const show = () => {
+    state.outOfScope = false;
     dom.container?.classList.remove('artisan-web-chat-container--hidden');
     dom.iframe?.classList.remove('artisan-web-chat-frame--hidden');
-    if (!state.pinned) {
-      dom.dock?.classList.remove('artisan-web-chat-dock--hidden');
-      dom.launcher?.classList.remove('artisan-web-chat-launcher--hidden');
-      dom.badge?.classList.remove('artisan-web-chat-badge--hidden');
-    }
+    applyHostChrome();
     renderBadge();
   };
 
@@ -960,14 +1032,27 @@
   // for the welcome card: the iframe loads, the opener arrives on the unread
   // message, and the card shows it. A greeted visitor, a visitor already in a
   // session, and a background tab all keep today's lazy mount.
+  //
+  // The iframe mounts immediately rather than after the delay. Deferring it put
+  // the whole bootstrap paint inside the card's own entrance, which measured as
+  // a two-second settle where the design settles in a quarter of that. The
+  // timer now gates only when the card is revealed, so the card still lands on
+  // the design's beat and the frame behind it is finished by then.
   const scheduleTeaserMount = () => {
     const wantsTeaser = !state.mounted && !hasGreeted() && !hasRecentSession();
     if (!wantsTeaser || document.visibilityState !== 'visible') {
       return;
     }
+    state.teaserGated = true;
+    mountIframe();
     state.teaserTimer = setTimeout(() => {
       state.teaserTimer = null;
-      mountIframe();
+      state.teaserGated = false;
+      const held = state.pendingTeaser;
+      state.pendingTeaser = null;
+      if (held) {
+        renderTeaser(held);
+      }
     }, TEASER_DELAY_MS);
   };
 
