@@ -13,10 +13,28 @@ Everything here is local and static. There is no build step and no backend.
 .
 ├── index.html      # The landing page + the widget bootstrap
 ├── config.js       # Site key + embed origin (the only thing you edit)
+├── visit-as.js     # Optional "visiting as" pill (dev tool, see below)
 ├── embed/
 │   └── loader.js   # Exact copy of the Artisan loader (apps/web/public/embed/loader.js)
 └── README.md
 ```
+
+## Keeping `embed/loader.js` in sync
+
+This copy has to be refreshed by hand (or by whatever tooling runs the sync)
+every time `apps/web/public/embed/loader.js` changes in the Artisan repo — it
+is not fetched live, for the `resolveScript()` reason explained below. A stale
+copy silently ships an old loader with no error: this is exactly what happened
+with AR2-5222, where SPA/hash navigation tracking shipped in the Artisan repo
+but this demo's loader.js stayed frozen at an earlier version for a month, so
+the demo page never reported hash-only navigations (e.g. `#contact`).
+
+`deploy-web-preview` (the Artisan repo's helper that deploys `apps/web` to the
+`artisan-inbound` Vercel preview) now syncs this file automatically after every
+run: it diffs the deployed `apps/web/public/embed/loader.js` against this repo's
+copy and pushes a refresh commit here if they differ. If you change the loader
+some other way (a local build, a different deploy path), refresh this file
+manually by copying `apps/web/public/embed/loader.js` from the Artisan repo.
 
 ## How to run it locally
 
@@ -142,33 +160,50 @@ from the iframe, not from this page:
 
 ## Visiting as a real lead ("visit-as" picker)
 
-`config.js` also sets `window.ARTISAN_WEBCHAT_VISIT_AS_SERVER`, which loads a
-floating picker (bottom-left pill) letting you search real leads in the org
-and de-anonymize the visitor as one of them, without the vendor round-trip a
-real Vector/Demandbase identification would take.
+`visit-as.js` draws a floating pill (bottom-left) that lets you de-anonymize the
+visitor as a real lead from the org, without the vendor round-trip a real
+Vector/Demandbase identification would take. Nothing runs locally: searching and
+picking happen in a panel on this page, which calls the Artisan API directly.
 
-It needs its own sidecar server, from `apps/web-chat-e2e` in the artisan repo:
+Signing in is the one part that cannot happen here. The Artisan session cookie
+is `SameSite=Lax` and host-only, so a request from `bryan-artisan.github.io`
+arrives without a session no matter what the server allows, and the app refuses
+to be framed at all. So the first click opens a small window on the Artisan app
+origin, where the cookie does apply. That window checks that you belong to the
+organization behind the site key, hands this page a token that is good for 30
+minutes and only for this site, and closes itself. Every later click just opens
+the panel.
 
-```bash
-DATABASE_URL=<postgres-url-for-the-env-you're-testing> pnpm visit-as
-```
+To use it:
 
-Point `DATABASE_URL` at whatever the widget's own API is reading from for the
-environment you're testing against (dev RDS for the preview deployment, a
-branch-workspace tunnel, or your local Postgres). The sidecar resolves the org
-from the page's own site key, so the same server works unmodified against any
-environment.
+1. Sign in at the embed origin (`https://app-inbound.dev.artisan.co`) with an
+   account that belongs to the organization that owns the site key in
+   `config.js`. The picker refuses anyone else.
+2. Open this page. The pill sits in the bottom-left corner on every visit.
+3. Click the pill. Until you have signed in, the panel explains that it needs an
+   Artisan session and offers a sign-in button, which opens one window that
+   closes on its own. Then search for a person in the panel and pick one, and
+   this page reloads itself.
 
-Picking a person seeds a fresh `website_visitor` row with a new Vector
-`up_id` and sets that as this page's `vector_up_id` cookie. It does **not**
-reach into an already-open conversation: web-chat only resolves identity once,
-on a fresh conversation, and only ever moves anonymous → identified, never
-back and never to a different person. To see the seeded identity, start a
-genuinely new conversation — a private/incognito window, or clearing this
-site's storage in the current one.
+Picking a person seeds a fresh `website_visitor` row with a new Vector `up_id`
+and sets that as this page's `vector_up_id` cookie. The reload is not cosmetic:
+the embed loader reads that cookie once, while it builds the iframe URL, so a
+cookie written after the widget loaded would otherwise reach nothing.
 
-Leave `ARTISAN_WEBCHAT_VISIT_AS_SERVER` unset to skip loading the picker
-entirely; a real customer's copy of this page never sets it.
+It does **not** reach into an already-open conversation. Web-chat resolves
+identity once, on a fresh conversation, and only ever moves anonymous →
+identified, never back and never to a different person. The widget also
+remembers its conversation across reloads, in storage on the Artisan origin
+rather than this one, so a chat you already started comes back as it was. To see
+the seeded identity from the first message, use a private window, or close the
+open chat out by rating it.
+
+The picker page and the API routes behind it only exist where the Artisan API
+has its development test routes enabled, which is the inbound preview and not
+production. Everywhere else the window says so and nothing is seeded. The token
+carries the site it was minted for, and the API re-checks your membership on
+every call, so losing access to the org ends the session on the next click
+rather than at expiry.
 
 ## Mixed-content caveat
 
