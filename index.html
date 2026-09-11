@@ -241,6 +241,37 @@
         padding: 40px 24px;
         border-top: 1px solid var(--line);
       }
+      .env-fab {
+        position: fixed;
+        top: 48px;
+        left: 16px;
+        z-index: 1000;
+        display: flex;
+        gap: 4px;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 4px;
+        box-shadow: 0 4px 16px rgba(18, 18, 26, 0.12);
+        font-size: 13px;
+      }
+      .env-fab button {
+        border: none;
+        background: transparent;
+        color: var(--muted);
+        padding: 6px 14px;
+        border-radius: 999px;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 600;
+      }
+      .env-fab button:hover {
+        color: var(--ink);
+      }
+      .env-fab button[aria-pressed='true'] {
+        background: var(--accent);
+        color: #fff;
+      }
     </style>
   </head>
   <body>
@@ -373,6 +404,37 @@
       config-driven injection works. See README.md.
     -->
     <script src="./config.js"></script>
+
+    <!--
+      Environment FAB (top left). Lets you switch the widget between the
+      inbound/dev/prod configs in config.js. Switching writes ?env=<name> to
+      the URL and reloads, so the choice is shareable and the widget (which
+      only reads its site key/embed origin once, on load) always reflects it.
+    -->
+    <div class="env-fab" id="env-fab"></div>
+    <script>
+      (() => {
+        const fab = document.getElementById('env-fab');
+        const environments = window.ARTISAN_WEBCHAT_ENVIRONMENTS;
+        const activeEnv = window.ARTISAN_WEBCHAT_ENV;
+
+        const switchEnv = (env) => {
+          const url = new URL(window.location.href);
+          url.searchParams.set('env', env);
+          window.location.href = url.toString();
+        };
+
+        Object.keys(environments).forEach((env) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = environments[env].label;
+          button.setAttribute('aria-pressed', String(env === activeEnv));
+          button.addEventListener('click', () => switchEnv(env));
+          fab.appendChild(button);
+        });
+      })();
+    </script>
+
     <script>
       (() => {
         const siteKey = window.ARTISAN_WEBCHAT_SITE_KEY;
