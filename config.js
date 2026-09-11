@@ -28,8 +28,11 @@ window.ARTISAN_WEBCHAT_ENVIRONMENTS = {
   },
   prod: {
     label: 'Prod',
-    siteKey: 'sk_1BFPomgPol49WRKyDjCgPjybDXs-kBUW',
-    embedOrigin: 'https://app.artisan.co',
+    // Real site key from a prod org's install snippet (web-chat console > install snippet).
+    siteKey: 'sk_qvttVXLrv2OdN9h0BAmS4hGeniZ7nDnX',
+    // Prod's public app serves from dashboard.artisan.co, not app.artisan.co: the latter
+    // 404s on /embed/loader.js while dashboard.artisan.co returns 200 (confirmed live).
+    embedOrigin: 'https://dashboard.artisan.co',
   },
 };
 
