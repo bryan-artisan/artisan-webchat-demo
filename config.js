@@ -21,7 +21,10 @@ window.ARTISAN_WEBCHAT_ENVIRONMENTS = {
   dev: {
     label: 'Dev',
     siteKey: 'sk_1BFPomgPol49WRKyDjCgPjybDXs-kBUW',
-    embedOrigin: 'https://app.dev.artisan.co',
+    // No "app." prefix on dev, unlike prod: the dev console itself serves from
+    // https://dev.artisan.co (confirmed from a real install snippet copied off
+    // that console), not https://app.dev.artisan.co.
+    embedOrigin: 'https://dev.artisan.co',
   },
   prod: {
     label: 'Prod',
