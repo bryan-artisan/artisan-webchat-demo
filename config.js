@@ -3,8 +3,8 @@
 // The widget bootstrap in index.html reads window.ARTISAN_WEBCHAT_SITE_KEY and
 // window.ARTISAN_WEBCHAT_EMBED_ORIGIN, set below from whichever environment is
 // selected. The environment is picked with the top-left FAB in index.html,
-// which reflects the choice in the URL as ?env=inbound|dev|crmtest|prod so a
-// link can be shared pinned to one environment. Default: inbound.
+// which reflects the choice in the URL as ?env=inbound|dev|prod so a link can
+// be shared pinned to one environment. Default: inbound.
 //
 // This same embed origin also serves the "visit as" picker (visit-as.js) at
 // /visit-as, opened in a popup by the pill on this page. See README.md.
@@ -25,15 +25,6 @@ window.ARTISAN_WEBCHAT_ENVIRONMENTS = {
     // https://dev.artisan.co (confirmed from a real install snippet copied off
     // that console), not https://app.dev.artisan.co.
     embedOrigin: 'https://dev.artisan.co',
-  },
-  crmtest: {
-    label: 'CRM test',
-    // Org "Bryan inbound CRM test" (01a0a15d-d20a-75ac-84c5-132312a8dde1), whose
-    // HubSpot connection points at the TEST portal 246692133. The inbound/dev key
-    // above belongs to an org connected to Artisan's PRODUCTION portal 45571519,
-    // so CRM write-back scenarios must run on this environment, never on those.
-    siteKey: 'sk_I7GvLMWYgsTuZyoXcbFU1JMQiG1xKSPa',
-    embedOrigin: 'https://app-inbound.dev.artisan.co',
   },
   prod: {
     label: 'Prod',
