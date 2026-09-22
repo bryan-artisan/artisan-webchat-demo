@@ -3,13 +3,20 @@
 // The widget bootstrap in index.html reads window.ARTISAN_WEBCHAT_SITE_KEY and
 // window.ARTISAN_WEBCHAT_EMBED_ORIGIN, set below from whichever environment is
 // selected. The environment is picked with the top-left FAB in index.html,
-// which reflects the choice in the URL as ?env=inbound|dev|prod so a link can
+// which reflects the choice in the URL as ?env=demo|inbound|dev|prod so a link can
 // be shared pinned to one environment. Default: inbound.
 //
 // This same embed origin also serves the "visit as" picker (visit-as.js) at
 // /visit-as, opened in a popup by the pill on this page. See README.md.
 
 window.ARTISAN_WEBCHAT_ENVIRONMENTS = {
+  demo: {
+    label: 'Demo',
+    // Site key from the demo org's install snippet (web-chat console > install snippet).
+    siteKey: 'sk_X2LjirTb4d0iWFVx6t6U12hXayPaRDC_',
+    // The demo app serves the embed from its own origin, https://demo.artisan.co.
+    embedOrigin: 'https://demo.artisan.co',
+  },
   inbound: {
     label: 'Inbound',
     // Real site key auto-minted by the inbound console (app-inbound.dev.artisan.co)
